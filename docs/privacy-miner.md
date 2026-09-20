@@ -15,6 +15,8 @@ Run `privacy-miner --help`. A selected node URL, local cookie file, matching nod
 
 One CPU worker solves real Equihash 200,9 work. The miner checks for changed chain tips, cancels stale work and handles Ctrl+C. `--blocks N` stops after N accepted blocks; zero runs until stopped. Accepted blocks must still be independently validated by peers. CPU capability on a low-difficulty testnet does not establish competitive CPU mining on a public network.
 
+The client refuses configured target limits above the standard upstream Testnet bound. Upstream difficulty adjustment sums seventeen targets in U256; the earlier experimental V1 limit could overflow that arithmetic. V1 is retired and must not be mined further. The offline generator now uses safe compact bits `2007ffff` for the replacement V2 network. This changes application configuration and generation inputs, not the solver or adjustment algorithm.
+
 The `genesis` subcommand constructs a deterministic disposable test genesis from the pinned historical Testnet fixture, preserving its original transaction. It uses the same upstream solver and verifies solution/target. This is not a production launch mechanism or an economic audit.
 
 Local integration evidence and Windows launchers are in the companion `brs-holding/privacy-network` repository. Verification includes real blocks accepted by three nodes, a corrupted Equihash header rejected, persistent restart, deterministic genesis reproduction, independent miner stop/restart and actual Ctrl+C handling. Boundary checks reject a wrong genesis, oversized RPC response, Regtest and unencrypted remote RPC. Full upstream workspace tests, production security review and the complete difficulty/fork test matrix are not implied by these targeted results.

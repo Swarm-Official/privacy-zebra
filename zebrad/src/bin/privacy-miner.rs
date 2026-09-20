@@ -23,11 +23,11 @@ mod app {
         time::{Duration, Instant},
     };
     use zebra_chain::{
-        parameters::NetworkKind,
+        parameters::{Network, NetworkKind},
         serialization::{ZcashDeserializeInto, ZcashSerialize},
         transparent::Address,
         work::{
-            difficulty::CompactDifficulty,
+            difficulty::{CompactDifficulty, ParameterDifficulty},
             equihash::{Solution, SolverCancelled},
         },
     };
@@ -165,7 +165,7 @@ It is not a mainnet launch genesis or final economic configuration.";
         header.time = chrono::DateTime::from_timestamp(1789862400, 0)
             .ok_or_else(|| eyre!("Invalid fixed timestamp"))?;
         header.difficulty_threshold =
-            CompactDifficulty::from_bytes_in_display_order(&[0x20, 0x7f, 0xff, 0xff])
+            CompactDifficulty::from_bytes_in_display_order(&[0x20, 0x07, 0xff, 0xff])
                 .map_err(|e| eyre!("Invalid fixed target: {e}"))?;
         header.nonce = [0; 32].into();
         println!("Solving deterministic TEST genesis with upstream Equihash solver...");
@@ -192,7 +192,7 @@ It is not a mainnet launch genesis or final economic configuration.";
             "purpose":"Disposable Privacy PoW testnet genesis; not a mainnet launch",
             "upstream_revision":"7c64a8419388dd72664a19a70aed66e84f3e2d5b",
             "upstream_genesis":"05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38",
-            "timestamp":1789862400u32, "bits":"207fffff", "nonce_start":"00".repeat(32),
+            "timestamp":1789862400u32, "bits":"2007ffff", "nonce_start":"00".repeat(32),
             "selection":"First successful upstream solver nonce, smallest display-order hash among returned headers",
             "hash":block.hash().to_string(), "block_hex":hex::encode(block.zcash_serialize_to_vec()?),
             "genesis_hash":block.hash().to_string(), "genesis_hex_file":hex_path.file_name().and_then(|n| n.to_str()),
@@ -230,6 +230,13 @@ It is not a mainnet launch genesis or final economic configuration.";
         let network = &config.network.network;
         if network.kind() != NetworkKind::Testnet || network.disable_pow() {
             bail!("This miner requires a PoW-enabled Testnet; Mainnet and Regtest are refused");
+        }
+        // Upstream retargeting sums seventeen expanded targets in U256. Its
+        // arithmetic assumes targets stay within the standard Testnet limit.
+        if network.target_difficulty_limit()
+            > Network::new_default_testnet().target_difficulty_limit()
+        {
+            bail!("Configured target limit exceeds the upstream retarget arithmetic bound; use the corrected testnet profile");
         }
         let payout: Address = opts.payout.parse()?;
         if payout.network_kind() != NetworkKind::Testnet {
