@@ -1,0 +1,295 @@
+# SWARM workstream B: native `zebrad` binaries with the internal CPU miner.
+#
+# Builds the *unmodified* Zebra source at tag v6.3.0 for Windows (MSVC), Linux
+# and macOS, with default release features plus the optional `internal-miner`
+# feature. No Rust source, `Cargo.toml` or `Cargo.lock` is changed, and the
+# build uses `--locked`, so the result is consensus-identical to the official
+# v6.3.0 release that PrivacyTestnetV2 already runs.
+#
+# Upstream lists `x86_64-pc-windows-msvc` as a Tier-3 platform (supported in
+# code, never built or tested by upstream CI), so the Windows job is the point
+# of this workflow.
+name: SWARM native binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - swarm-ci
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Kept in sync with the tag this branch is based on.
+  SWARM_TAG: v6.3.0
+  # Default features are kept; `internal-miner` is added on top of them.
+  SWARM_FEATURES: internal-miner
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: zebrad ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    # A cold release build of Zebra (RocksDB + the zcash C++ script
+    # interpreter + the tromp Equihash solver) can take well over an hour.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+          # Ubuntu 22.04 keeps the glibc floor low for older distributions.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            archive: tar.gz
+    env:
+      TARGET: ${{ matrix.target }}
+      ARCHIVE: ${{ matrix.archive }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install build prerequisites (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 -qq update
+          sudo apt-get -o Acquire::Retries=3 -qq install -y --no-install-recommends \
+            clang libclang-dev cmake protobuf-compiler
+
+      - name: Install build prerequisites (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          brew install protobuf
+          # bindgen (librocksdb-sys) needs libclang; Xcode ships one.
+          echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "${GITHUB_ENV}"
+
+      - name: Install build prerequisites (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          # bindgen (librocksdb-sys) needs libclang.dll. The runner image ships
+          # LLVM; install it only if that ever stops being true.
+          llvm_bin='C:\Program Files\LLVM\bin'
+          if [ ! -f "/c/Program Files/LLVM/bin/libclang.dll" ]; then
+            choco install llvm --no-progress -y
+          fi
+          if [ ! -f "/c/Program Files/LLVM/bin/libclang.dll" ]; then
+            echo "::error::libclang.dll not found; RocksDB bindgen will fail"
+            exit 1
+          fi
+          echo "LIBCLANG_PATH=${llvm_bin}" >> "${GITHUB_ENV}"
+          # protoc is optional for zebrad: zebra-rpc/build.rs falls back to the
+          # pre-generated indexer protos when it is missing. Do not fail the
+          # build if Chocolatey is having a bad day.
+          choco install protoc --no-progress -y || echo "::warning::protoc not installed; using pre-generated protos"
+
+      # The toolchain version comes from the tag's rust-toolchain.toml
+      # (channel = 1.91.0), which satisfies zebrad's rust-version = 1.91.
+      # rustflags is emptied on purpose: the action defaults to `-D warnings`,
+      # and a Tier-3 platform warning must not fail a release build.
+      - name: Install the Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache: false
+          rustflags: ""
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: swarm-${{ matrix.target }}-internal-miner
+          cache-on-failure: true
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          rustc -Vv
+          cargo -V
+          cargo tree --locked -p zebrad -e no-dev -i equihash || true
+
+      - name: Build zebrad with the internal miner
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package zebrad --bin zebrad --features "${SWARM_FEATURES}"
+
+      - name: Smoke test
+        run: |
+          set -uo pipefail
+
+          bin="target/release/zebrad"
+          [ "${RUNNER_OS}" = "Windows" ] && bin="target/release/zebrad.exe"
+
+          echo "--- zebrad --version ---"
+          "${bin}" --version || exit 1
+
+          echo "--- zebrad generate ---"
+          "${bin}" generate -o generated.toml || exit 1
+          head -n 3 generated.toml
+
+          # Minimal, fully isolated configured-Testnet run: ephemeral state,
+          # no peers at all, loopback listener, no mining.
+          cat > smoke.toml <<'TOML'
+          [network]
+          network = "Testnet"
+          listen_addr = "127.0.0.1:38233"
+          initial_mainnet_peers = []
+          initial_testnet_peers = []
+          cache_dir = false
+
+          [network.testnet_parameters]
+          network_name = "PrivacyTestnetV2"
+          network_magic = [80, 82, 86, 50]
+          genesis_hash = "01d6e85dd3c1c128941a849c5025cd2e437258811a2551b82aefd68686c982e1"
+          disable_pow = false
+          checkpoints = false
+          slow_start_interval = 0
+          pre_blossom_halving_interval = 840000
+          target_difficulty_limit = "07ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          lockbox_disbursements = []
+          funding_streams = [{ height_range = { start = 1, end = 100000000 }, recipients = [] }]
+
+          [network.testnet_parameters.activation_heights]
+          BeforeOverwinter = 1
+          Overwinter = 1
+          Sapling = 1
+          Blossom = 1
+          Heartwood = 1
+          Canopy = 1
+          NU5 = 1
+          NU6 = 1
+          "NU6.1" = 1
+          "NU6.2" = 1
+          "NU6.3" = 1
+
+          [state]
+          ephemeral = true
+
+          [rpc]
+          listen_addr = "127.0.0.1:38243"
+          enable_cookie_auth = true
+          cookie_dir = "."
+
+          [mempool]
+          debug_enable_at_height = 0
+
+          [mining]
+          internal_miner = false
+
+          [tracing]
+          use_color = false
+          TOML
+
+          echo "--- zebrad start (30s) ---"
+          "${bin}" -c smoke.toml start > smoke.log 2>&1 &
+          pid=$!
+          sleep 30
+
+          if ! kill -0 "${pid}" 2>/dev/null; then
+            echo "::error::zebrad exited before the 30s smoke window elapsed"
+            cat smoke.log
+            exit 1
+          fi
+
+          kill "${pid}" 2>/dev/null || true
+          sleep 5
+          kill -9 "${pid}" 2>/dev/null || true
+          wait "${pid}" 2>/dev/null || true
+
+          echo "--- smoke.log ---"
+          cat smoke.log
+
+          status=0
+          grep -q "Opened Zebra state cache at" smoke.log \
+            || { echo "::error::state database was never opened"; status=1; }
+          grep -q "Opened Zcash protocol endpoint at" smoke.log \
+            || { echo "::error::P2P listener never opened"; status=1; }
+          if grep -qE "panicked at|PANIC|fatal runtime error" smoke.log; then
+            echo "::error::zebrad panicked during the smoke test"
+            status=1
+          fi
+          exit "${status}"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+
+          sha256() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
+          }
+
+          bin_name="zebrad"
+          [ "${RUNNER_OS}" = "Windows" ] && bin_name="zebrad.exe"
+
+          stage="swarm-zebrad-${SWARM_TAG}-${TARGET}"
+          mkdir -p "dist/${stage}"
+          cp "target/release/${bin_name}" "dist/${stage}/${bin_name}"
+          cp LICENSE-APACHE LICENSE-MIT README.md "dist/${stage}/"
+
+          rustc_vv="$(rustc -Vv | sed ':a;N;$!ba;s/\n/\\n/g')"
+          zebrad_version="$("target/release/${bin_name}" --version | tr -d '\r')"
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          printf '%s\n' \
+            '{' \
+            "  \"artifact\": \"${stage}.${ARCHIVE}\"," \
+            "  \"binary\": \"${bin_name}\"," \
+            "  \"zebrad_version\": \"${zebrad_version}\"," \
+            "  \"source_tag\": \"${SWARM_TAG}\"," \
+            "  \"git_commit\": \"${GITHUB_SHA}\"," \
+            "  \"git_ref\": \"${GITHUB_REF}\"," \
+            "  \"repository\": \"${GITHUB_REPOSITORY}\"," \
+            "  \"target\": \"${TARGET}\"," \
+            "  \"cargo_command\": \"cargo build --locked --release --package zebrad --bin zebrad --features ${SWARM_FEATURES}\"," \
+            "  \"cargo_features\": \"default (= default-release-binaries) + ${SWARM_FEATURES}\"," \
+            "  \"rustc_version\": \"${rustc_vv}\"," \
+            "  \"runner_os\": \"${RUNNER_OS}\"," \
+            "  \"runner_arch\": \"${RUNNER_ARCH}\"," \
+            "  \"runner_image\": \"${ImageOS:-unknown}/${ImageVersion:-unknown}\"," \
+            "  \"workflow_run\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"," \
+            "  \"built_at_utc\": \"${built_at}\"" \
+            '}' > "dist/${stage}/build-manifest.json"
+
+          cat "dist/${stage}/build-manifest.json"
+
+          # Both archive formats hold the files at the archive root, with no
+          # wrapping directory, so unpacking always yields a flat bin folder.
+          cd dist
+          if [ "${ARCHIVE}" = "zip" ]; then
+            powershell -NoProfile -NonInteractive -Command \
+              "Compress-Archive -Path '${stage}/*' -DestinationPath '${stage}.zip' -CompressionLevel Optimal"
+          else
+            tar -czf "${stage}.tar.gz" -C "${stage}" \
+              "${bin_name}" LICENSE-APACHE LICENSE-MIT README.md build-manifest.json
+          fi
+          rm -rf "${stage}"
+          sha256 "${stage}.${ARCHIVE}" > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: swarm-zebrad-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the smoke-test log on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: swarm-zebrad-${{ matrix.target }}-smoke-log
+          path: smoke.log
+          if-no-files-found: ignore
+          retention-days: 30
