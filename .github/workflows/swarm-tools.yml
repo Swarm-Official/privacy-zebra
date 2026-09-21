@@ -157,6 +157,16 @@ jobs:
             case "${addr}" in t2*) ;; *) echo "::error::${label} is not a t2 address"; exit 1 ;; esac
             recomputed="$("${keytool}" address --redeem-script "${script}" | tr -d '\r')"
             [ "${recomputed}" = "${addr}" ] || { echo "::error::${label} address does not round-trip"; exit 1; }
+            # `show` reprints the public part and must never reveal a private key.
+            shown="$("${keytool}" show --keys-file "smoke-keys/${label}.keys.json" | tr -d '\r')"
+            echo "${shown}"
+            echo "${shown}" | grep -q "${addr}" \
+              || { echo "::error::show did not print ${label}'s address"; exit 1; }
+            echo "${shown}" | grep -q "${script}" \
+              || { echo "::error::show did not print ${label}'s redeem script"; exit 1; }
+            if echo "${shown}" | grep -qi "secret"; then
+              echo "::error::show printed something secret"; exit 1
+            fi
           done
           echo "--- an existing key file is never overwritten ---"
           if "${keytool}" new --threshold 1 --keys 1 --label ci-single --out smoke-keys; then

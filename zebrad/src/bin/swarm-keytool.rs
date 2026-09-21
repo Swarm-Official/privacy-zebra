@@ -37,6 +37,7 @@ const HELP: &str = "swarm-keytool — offline SWARM testnet P2SH destination add
 Usage:\n\
   swarm-keytool new --threshold M --keys N --label NAME --out DIR\n\
   swarm-keytool address --redeem-script HEX\n\
+  swarm-keytool show --keys-file PATH\n\
   swarm-keytool --help\n\
 \n\
 `new` generates N secp256k1 keys from the OS CSPRNG, builds the standard\n\
@@ -50,6 +51,11 @@ existing file is never overwritten, and are never printed. Keep that file\n\
 offline: anyone holding M of the N keys can spend from the address.\n\
 \n\
 `address` recomputes the address from a redeem script and prints nothing else.\n\
+\n\
+`show` reprints the PUBLIC part of an existing key file -- label, threshold,\n\
+address, redeem script and public keys -- so an operator never has to open a\n\
+key file to recover them. It never reads or prints any private key, and it\n\
+refuses if the recorded address does not match the recorded redeem script.\n\
 \n\
 This is a testnet engineering tool, not a key-ceremony procedure and not an\n\
 audited custody solution.";
@@ -77,6 +83,7 @@ fn run() -> Result<(), String> {
         }
         Some("new") => cmd_new(&args[1..]),
         Some("address") => cmd_address(&args[1..]),
+        Some("show") => cmd_show(&args[1..]),
         Some(other) => Err(format!("unknown subcommand {other:?}; use --help")),
     }
 }
@@ -172,6 +179,82 @@ fn cmd_address(args: &[String]) -> Result<(), String> {
     }
     println!("{}", p2sh_testnet_address(&script));
     Ok(())
+}
+
+/// The public fields of a key file, and nothing else.
+///
+/// An operator who lost the terminal output of `new` needs the address, the
+/// redeem script and the public keys back. Opening the key file by hand to get
+/// them puts the private keys on screen and in shell history; this prints only
+/// the public part and never touches the private material beyond leaving it in
+/// the file.
+fn cmd_show(args: &[String]) -> Result<(), String> {
+    let parsed = options(args, &["keys-file"])?;
+    let path = PathBuf::from(required(&parsed, "keys-file")?);
+    let body = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let document: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))?;
+    public_summary(&document).map(|lines| {
+        for line in lines {
+            println!("{line}");
+        }
+    })
+}
+
+/// Builds the printable public summary, re-deriving the address from the
+/// recorded redeem script and refusing if the two disagree.
+fn public_summary(document: &serde_json::Value) -> Result<Vec<String>, String> {
+    let text = |key: &str| -> Result<String, String> {
+        document
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("the key file has no string field {key:?}"))
+    };
+    let redeem_hex = text("redeem_script")?;
+    let recorded_address = text("address")?;
+    let script = hex::decode(&redeem_hex)
+        .map_err(|_| "the recorded redeem script is not hexadecimal".to_string())?;
+    let derived = p2sh_testnet_address(&script).to_string();
+    if derived != recorded_address {
+        return Err(format!(
+            "the key file is inconsistent: its redeem script hashes to {derived}, \
+             but it records the address {recorded_address}"
+        ));
+    }
+
+    let threshold = document
+        .get("threshold")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "the key file has no numeric threshold".to_string())?;
+    let keys = document
+        .get("keys")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "the key file has no numeric key count".to_string())?;
+
+    let mut lines = vec![
+        format!("label          {}", text("label")?),
+        format!("address        {derived}"),
+        format!("redeem_script  {redeem_hex}"),
+    ];
+    let material = document
+        .get("key_material")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "the key file has no key_material array".to_string())?;
+    for (index, entry) in material.iter().enumerate() {
+        // Only the public key is ever taken out of the entry.
+        let public_key = entry
+            .get("public_key")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| format!("key_material[{index}] has no public_key"))?;
+        lines.push(format!("public_key[{index}]  {public_key}"));
+    }
+    if material.len() as u64 != keys {
+        return Err("the key file's key count does not match its key material".to_string());
+    }
+    lines.push(format!("threshold      {threshold} of {keys}"));
+    Ok(lines)
 }
 
 fn cmd_new(args: &[String]) -> Result<(), String> {
@@ -480,5 +563,35 @@ mod tests {
             parsed["key_material"][0]["public_key"],
             hex::encode(pubkeys[0])
         );
+
+        // `show` reprints the public part of that same file and never the
+        // private key.
+        let lines = public_summary(&parsed).expect("public summary");
+        let printed = lines.join("\n");
+        assert!(printed.contains(&address.to_string()));
+        assert!(printed.contains(&hex::encode(&script)));
+        assert!(printed.contains(&hex::encode(pubkeys[0])));
+        assert!(printed.contains("threshold      1 of 1"));
+        let secret = hex::encode(secrets[0].secret_bytes());
+        assert!(!printed.contains(&secret), "the summary leaked a private key");
+        assert!(!printed.contains("secret"), "the summary mentions a secret");
+    }
+
+    /// `show` refuses a key file whose address does not match its script.
+    #[test]
+    fn show_refuses_an_inconsistent_key_file() {
+        let script = redeem_script(1, &[key(P1)]).unwrap();
+        let mut document = serde_json::json!({
+            "label": "tampered",
+            "address": "t2L51LcmpA43UMvKTw2Lwtt9LMjwyqU2V1P",
+            "threshold": 1,
+            "keys": 1,
+            "redeem_script": hex::encode(&script),
+            "key_material": [{"index": 0, "public_key": P1}],
+        });
+        assert!(public_summary(&document).is_err());
+
+        document["address"] = serde_json::json!(p2sh_testnet_address(&script).to_string());
+        assert!(public_summary(&document).is_ok());
     }
 }

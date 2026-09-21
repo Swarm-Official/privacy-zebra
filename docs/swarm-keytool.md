@@ -21,11 +21,14 @@ The tool only:
 ```sh
 swarm-keytool new --threshold M --keys N --label NAME --out DIR
 swarm-keytool address --redeem-script HEX
+swarm-keytool show --keys-file PATH
 ```
 
 `new` prints only the address, the redeem script hex, the public keys, the threshold and the path of the key file. `1 <= M <= N <= 15`; `--threshold 1 --keys 1` is a valid single-signature script. Private keys are written once to `DIR/NAME.keys.json` with `create_new`, so an existing key file is never overwritten, and `0600` permissions on Unix. They are never printed or logged. Labels are restricted to letters, digits, `-` and `_` because they become file names.
 
 `address` recomputes the address from a redeem script and prints nothing else. It is the check to run before a recipient address is written into a network configuration.
+
+`show` reprints the public part of an existing key file — label, threshold, address, redeem script and public keys. It exists so that an operator who lost the terminal output of `new` never has to open a key file by hand, which would put the private keys on screen and in shell history. It prints no private material, and it refuses if the address recorded in the file does not match the hash of the redeem script recorded in the same file.
 
 Anyone holding `M` of the `N` keys can spend from the address. Spending from a P2SH multisig needs signing support that neither the desktop wallet nor Zallet provides today, so until a spending path is demonstrated these balances are "received and visible", not "spendable".
 
