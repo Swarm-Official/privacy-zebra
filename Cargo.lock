@@ -7650,6 +7650,8 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest 0.12.28",
+ "ripemd 0.1.3",
+ "secp256k1",
  "semver",
  "sentry",
  "serde",

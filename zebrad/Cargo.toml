@@ -224,6 +224,13 @@ config = { workspace = true }
 num-integer = { workspace = true }
 rand = { workspace = true }
 
+# Downstream tool binary zebrad/src/bin/swarm-keytool.rs only. Both crates are
+# already built as part of this workspace (zebra-chain depends on them at the
+# same versions), so this adds no package and changes no resolved version: the
+# only Cargo.lock delta is the two names in zebrad's own dependency list.
+ripemd = { workspace = true }
+secp256k1 = { workspace = true }
+
 # prod feature internal-miner
 thread-priority = { workspace = true, optional = true }
 

@@ -42,8 +42,9 @@ Use the same custom-Testnet network configuration as your node. Set [mining].min
 on that node to your chosen payout first. This client verifies the coinbase recipient.\n\
 One CPU worker; --blocks 0 (default) runs until Ctrl+C. Mainnet and Regtest are refused.\n\
 HTTP is permitted only on loopback; use HTTPS or a local SSH tunnel for your remote node.\n\
-Offline TEST genesis: privacy-miner genesis UPSTREAM_TEST_GENESIS_HEX OUTPUT_JSON\n\
-The test genesis uses a fixed timestamp/target and the unchanged upstream coinbase fixture.\n\
+Offline TEST genesis: privacy-miner genesis UPSTREAM_TEST_GENESIS_HEX OUTPUT_JSON UNIX_TIME\n\
+UNIX_TIME is required and is the only per-network input: the header time in seconds.\n\
+The test genesis uses a fixed target (2007ffff) and the unchanged upstream coinbase fixture.\n\
 It is not a mainnet launch genesis or final economic configuration.";
 
     struct Options {
@@ -150,9 +151,20 @@ It is not a mainnet launch genesis or final economic configuration.";
     fn genesis() -> Result<()> {
         use std::io::Write;
         let args: Vec<_> = std::env::args().skip(2).collect();
-        if args.len() != 2 {
-            bail!("Usage: privacy-miner genesis UPSTREAM_TEST_GENESIS_HEX OUTPUT_JSON");
+        if args.len() != 3 {
+            bail!("Usage: privacy-miner genesis UPSTREAM_TEST_GENESIS_HEX OUTPUT_JSON UNIX_TIME");
         }
+        // The header time is the only per-network input. Everything else
+        // (fixture, coinbase, merkle root, compact target, start nonce and the
+        // selection rule) stays exactly as it was for PrivacyTestnetV2.
+        let timestamp: i64 = args[2]
+            .parse()
+            .map_err(|_| eyre!("UNIX_TIME must be a whole number of seconds since the epoch"))?;
+        let header_time = chrono::DateTime::from_timestamp(timestamp, 0)
+            .ok_or_else(|| eyre!("UNIX_TIME is not a representable timestamp"))?;
+        let timestamp_u32: u32 = timestamp
+            .try_into()
+            .map_err(|_| eyre!("UNIX_TIME does not fit the 32-bit block header time field"))?;
         let input = std::fs::read_to_string(&args[0])?;
         let bytes = hex::decode(input.split_whitespace().collect::<String>())?;
         let mut block: zebra_chain::block::Block = bytes.as_slice().zcash_deserialize_into()?;
@@ -162,8 +174,7 @@ It is not a mainnet launch genesis or final economic configuration.";
             bail!("Expected the pinned original Zcash Testnet genesis fixture");
         }
         let mut header = *block.header;
-        header.time = chrono::DateTime::from_timestamp(1789862400, 0)
-            .ok_or_else(|| eyre!("Invalid fixed timestamp"))?;
+        header.time = header_time;
         header.difficulty_threshold =
             CompactDifficulty::from_bytes_in_display_order(&[0x20, 0x07, 0xff, 0xff])
                 .map_err(|e| eyre!("Invalid fixed target: {e}"))?;
@@ -189,10 +200,10 @@ It is not a mainnet launch genesis or final economic configuration.";
         block.header = Arc::new(header);
         let hex_path = PathBuf::from(&args[1]).with_file_name("genesis.hex");
         let report = json!({
-            "purpose":"Disposable Privacy PoW testnet genesis; not a mainnet launch",
+            "purpose":"Disposable SWARM PoW testnet genesis (SwarmTestnet family); not a mainnet launch",
             "upstream_revision":"7c64a8419388dd72664a19a70aed66e84f3e2d5b",
             "upstream_genesis":"05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38",
-            "timestamp":1789862400u32, "bits":"2007ffff", "nonce_start":"00".repeat(32),
+            "timestamp":timestamp_u32, "bits":"2007ffff", "nonce_start":"00".repeat(32),
             "selection":"First successful upstream solver nonce, smallest display-order hash among returned headers",
             "hash":block.hash().to_string(), "block_hex":hex::encode(block.zcash_serialize_to_vec()?),
             "genesis_hash":block.hash().to_string(), "genesis_hex_file":hex_path.file_name().and_then(|n| n.to_str()),

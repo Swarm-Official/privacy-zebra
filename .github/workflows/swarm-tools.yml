@@ -1,0 +1,239 @@
+# SWARM workstream A: the two downstream tool binaries.
+#
+# `privacy-miner` (the standalone RPC miner and the deterministic offline
+# genesis generator) and `swarm-keytool` (offline P2SH destination addresses
+# for the funding streams) are built from this workspace with `--locked`.
+#
+# No consensus or cryptographic source is touched. The only changes on this
+# branch are the two files in `zebrad/src/bin/`, two additive entries in
+# `zebrad/Cargo.toml` (`ripemd` and `secp256k1`, both already built in this
+# workspace for `zebra-chain`, at unchanged versions), the two matching names
+# in zebrad's own `Cargo.lock` dependency list, this workflow and docs.
+name: SWARM tool binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - swarm-tools
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SWARM_FEATURES: internal-miner
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # The SwarmTestnet header time, 2026-09-22 00:00:00 UTC. CI solves the same
+  # genesis as the operator does natively, so three independent machines can be
+  # compared.
+  SWARM_GENESIS_TIME: "1790035200"
+
+jobs:
+  build:
+    name: tools ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install build prerequisites (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 -qq update
+          sudo apt-get -o Acquire::Retries=3 -qq install -y --no-install-recommends \
+            clang libclang-dev cmake protobuf-compiler
+
+      - name: Install build prerequisites (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          llvm_bin='C:\Program Files\LLVM\bin'
+          if [ ! -f "/c/Program Files/LLVM/bin/libclang.dll" ]; then
+            choco install llvm --no-progress -y
+          fi
+          if [ ! -f "/c/Program Files/LLVM/bin/libclang.dll" ]; then
+            echo "::error::libclang.dll not found; RocksDB bindgen will fail"
+            exit 1
+          fi
+          echo "LIBCLANG_PATH=${llvm_bin}" >> "${GITHUB_ENV}"
+          choco install protoc --no-progress -y || echo "::warning::protoc not installed; using pre-generated protos"
+
+      # rustflags is emptied on purpose: the action defaults to `-D warnings`
+      # and a Tier-3 platform warning must not fail a release build.
+      - name: Install the Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache: false
+          rustflags: ""
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: swarm-tools-${{ matrix.target }}
+          cache-on-failure: true
+
+      # Fails immediately if the checked-in Cargo.lock does not already satisfy
+      # the manifests, which is the whole point of the additive lock entry.
+      - name: Prove the lockfile is complete and unchanged
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
+          echo "Cargo.lock satisfies --locked and was not rewritten"
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          rustc -Vv
+          cargo -V
+
+      - name: Build the tool binaries
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package zebrad \
+            --bin privacy-miner --bin swarm-keytool --features "${SWARM_FEATURES}"
+
+      - name: Unit tests for the tool binaries
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --package zebrad \
+            --features "${SWARM_FEATURES}" --bin swarm-keytool -- --nocapture
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          ext=""
+          if [ "${RUNNER_OS}" = "Windows" ]; then ext=".exe"; fi
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+          miner="target/release/privacy-miner${ext}"
+          keytool="target/release/swarm-keytool${ext}"
+
+          echo "--- privacy-miner --help ---"
+          "${miner}" --help
+          "${miner}" --help | grep -q "OUTPUT_JSON UNIX_TIME" \
+            || { echo "::error::genesis usage does not require UNIX_TIME"; exit 1; }
+
+          echo "--- genesis refuses a missing time ---"
+          if "${miner}" genesis zebra-test/src/vectors/block-test-0-000-000.txt /tmp/nope.json; then
+            echo "::error::genesis accepted two arguments"; exit 1
+          fi
+
+          echo "--- swarm-keytool --help ---"
+          "${keytool}" --help
+
+          echo "--- swarm-keytool address known vector ---"
+          vector="51210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179851ae"
+          got="$("${keytool}" address --redeem-script "${vector}" | tr -d '\r')"
+          echo "got ${got}"
+          [ "${got}" = "t2JaQV6iQ9MA3HmWVYhfEn9mrMh3fRZpwTA" ] \
+            || { echo "::error::address vector mismatch"; exit 1; }
+
+          echo "--- swarm-keytool new 1-of-1 and 2-of-3 ---"
+          mkdir -p smoke-keys
+          "${keytool}" new --threshold 1 --keys 1 --label ci-single --out smoke-keys
+          "${keytool}" new --threshold 2 --keys 3 --label ci-multi --out smoke-keys
+          for label in ci-single ci-multi; do
+            addr="$("${PY}" -c "import json;print(json.load(open('smoke-keys/${label}.keys.json'))['address'])" | tr -d '\r')"
+            script="$("${PY}" -c "import json;print(json.load(open('smoke-keys/${label}.keys.json'))['redeem_script'])" | tr -d '\r')"
+            case "${addr}" in t2*) ;; *) echo "::error::${label} is not a t2 address"; exit 1 ;; esac
+            recomputed="$("${keytool}" address --redeem-script "${script}" | tr -d '\r')"
+            [ "${recomputed}" = "${addr}" ] || { echo "::error::${label} address does not round-trip"; exit 1; }
+          done
+          echo "--- an existing key file is never overwritten ---"
+          if "${keytool}" new --threshold 1 --keys 1 --label ci-single --out smoke-keys; then
+            echo "::error::key file was overwritten"; exit 1
+          fi
+          rm -rf smoke-keys
+
+          echo "--- deterministic SwarmTestnet genesis (cross-platform check) ---"
+          mkdir -p genesis-check
+          "${miner}" genesis zebra-test/src/vectors/block-test-0-000-000.txt \
+            genesis-check/genesis-manifest.json "${SWARM_GENESIS_TIME}"
+          "${PY}" - <<'PY'
+          import hashlib, json, pathlib
+          m = json.loads(pathlib.Path("genesis-check/genesis-manifest.json").read_text())
+          h = pathlib.Path("genesis-check/genesis.hex").read_text().strip()
+          assert m["bits"] == "2007ffff", m["bits"]
+          assert m["timestamp"] == 1790035200, m["timestamp"]
+          assert "SWARM" in m["purpose"], m["purpose"]
+          assert m["block_hex"] == h
+          print("genesis_hash", m["genesis_hash"])
+          print("block_sha256", hashlib.sha256(bytes.fromhex(h)).hexdigest())
+          pathlib.Path("genesis-check/GENESIS-HASH.txt").write_text(m["genesis_hash"] + "\n")
+          PY
+          cat genesis-check/GENESIS-HASH.txt
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          sha256() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
+          }
+          ext=""
+          if [ "${RUNNER_OS}" = "Windows" ]; then ext=".exe"; fi
+
+          stage="swarm-tools-${TARGET}"
+          mkdir -p "dist/${stage}"
+          cp "target/release/privacy-miner${ext}" "dist/${stage}/privacy-miner${ext}"
+          cp "target/release/swarm-keytool${ext}" "dist/${stage}/swarm-keytool${ext}"
+          cp LICENSE-APACHE LICENSE-MIT "dist/${stage}/"
+          cp docs/privacy-miner.md docs/swarm-keytool.md "dist/${stage}/"
+          cp genesis-check/GENESIS-HASH.txt "dist/${stage}/CI-SWARMTESTNET-GENESIS-HASH.txt"
+
+          rustc_vv="$(rustc -Vv | sed ':a;N;$!ba;s/\n/\\n/g')"
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' \
+            '{' \
+            "  \"artifact\": \"${stage}.zip\"," \
+            "  \"binaries\": [\"privacy-miner${ext}\", \"swarm-keytool${ext}\"]," \
+            "  \"git_commit\": \"${GITHUB_SHA}\"," \
+            "  \"git_ref\": \"${GITHUB_REF}\"," \
+            "  \"repository\": \"${GITHUB_REPOSITORY}\"," \
+            "  \"target\": \"${TARGET}\"," \
+            "  \"cargo_command\": \"cargo build --locked --release --package zebrad --bin privacy-miner --bin swarm-keytool --features ${SWARM_FEATURES}\"," \
+            "  \"rustc_version\": \"${rustc_vv}\"," \
+            "  \"runner_os\": \"${RUNNER_OS}\"," \
+            "  \"runner_image\": \"${ImageOS:-unknown}/${ImageVersion:-unknown}\"," \
+            "  \"ci_swarmtestnet_genesis_time\": ${SWARM_GENESIS_TIME}," \
+            "  \"ci_swarmtestnet_genesis_hash\": \"$(tr -d '\n\r' < genesis-check/GENESIS-HASH.txt)\"," \
+            "  \"workflow_run\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"," \
+            "  \"built_at_utc\": \"${built_at}\"" \
+            '}' > "dist/${stage}/build-manifest.json"
+          cat "dist/${stage}/build-manifest.json"
+
+          cd dist
+          if command -v zip >/dev/null 2>&1; then
+            (cd "${stage}" && zip -q -X -r "../${stage}.zip" .)
+          else
+            powershell -NoProfile -NonInteractive -Command \
+              "Compress-Archive -Path '${stage}/*' -DestinationPath '${stage}.zip' -CompressionLevel Optimal"
+          fi
+          rm -rf "${stage}"
+          sha256 "${stage}.zip" > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: swarm-tools-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

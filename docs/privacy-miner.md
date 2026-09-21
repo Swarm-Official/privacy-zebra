@@ -19,6 +19,12 @@ The client refuses configured target limits above the standard upstream Testnet 
 
 The `genesis` subcommand constructs a deterministic disposable test genesis from the pinned historical Testnet fixture, preserving its original transaction. It uses the same upstream solver and verifies solution/target. This is not a production launch mechanism or an economic audit.
 
+```sh
+privacy-miner genesis UPSTREAM_TEST_GENESIS_HEX OUTPUT_JSON UNIX_TIME
+```
+
+`UNIX_TIME` is required. It is the header time in whole seconds and is the only per-network input: the fixture, its coinbase and Merkle root, the compact target `2007ffff`, the 32-zero-byte start nonce and the selection rule (smallest display-order hash among the solutions returned for the first successful nonce) are all unchanged. The manifest records the time that was actually used, the bits string and a purpose line naming SWARM, and both output files are created with `create_new`, so an existing genesis is never overwritten. Two runs of the same command into two fresh directories must produce byte-identical `genesis.hex` files.
+
 Local integration evidence and Windows launchers are in the companion `brs-holding/privacy-network` repository. Verification includes real blocks accepted by three nodes, a corrupted Equihash header rejected, persistent restart, deterministic genesis reproduction, independent miner stop/restart and actual Ctrl+C handling. Boundary checks reject a wrong genesis, oversized RPC response, Regtest and unencrypted remote RPC. Full upstream workspace tests, production security review and the complete difficulty/fork test matrix are not implied by these targeted results.
 
 Original upstream licenses remain applicable. The adapter is MIT OR Apache-2.0 and was developed with Codex assistance for the user's downstream test network.
