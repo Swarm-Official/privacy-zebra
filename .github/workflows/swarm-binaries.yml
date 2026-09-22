@@ -54,6 +54,13 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive: tar.gz
+          # Intel Macs. macos-13 is the last image with an x86_64 host, so the
+          # build is native rather than cross-compiled - the same as every
+          # other target here. These runners are scarce and the job may sit in
+          # the queue for a long time before it starts.
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: tar.gz
     env:
       TARGET: ${{ matrix.target }}
       ARCHIVE: ${{ matrix.archive }}
