@@ -16,6 +16,7 @@ on:
   push:
     branches:
       - swarm-tools
+      - swarm-tools-macos
 
 permissions:
   contents: read
@@ -47,6 +48,13 @@ jobs:
             runner: windows-latest
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
+          # SWARM Node needs a macOS miner: the node already builds for
+          # aarch64-apple-darwin, but privacy-miner did not, so the standard
+          # multi-core engine was unavailable on a Mac.
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-13
     env:
       TARGET: ${{ matrix.target }}
     steps:
@@ -61,6 +69,16 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -qq update
           sudo apt-get -o Acquire::Retries=3 -qq install -y --no-install-recommends \
             clang libclang-dev cmake protobuf-compiler
+
+      - name: Install build prerequisites (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          # RocksDB's bindgen needs libclang; Apple's clang ships one. cmake and
+          # protobuf come from Homebrew, which the runner image already has.
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+          brew list protobuf >/dev/null 2>&1 || brew install protobuf
+          echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "${GITHUB_ENV}"
 
       - name: Install build prerequisites (Windows)
         if: runner.os == 'Windows'
