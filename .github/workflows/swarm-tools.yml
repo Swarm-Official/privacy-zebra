@@ -13,6 +13,11 @@ name: SWARM tool binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Native target (all or a Rust target triple)'
+        default: 'all'
+        type: string
   push:
     branches:
       - swarm-tools
@@ -36,25 +41,29 @@ env:
   SWARM_GENESIS_TIME: "1790035200"
 
 jobs:
+  select-targets:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.select.outputs.result }}
+    steps:
+      - uses: actions/github-script@v7
+        id: select
+        env:
+          TARGET: ${{ inputs.target || 'all' }}
+        with:
+          script: |
+            const rows = [{"target":"x86_64-pc-windows-msvc","runner":"windows-latest"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04"},{"target":"aarch64-apple-darwin","runner":"macos-14"},{"target":"x86_64-apple-darwin","runner":"macos-15-intel"}];
+            const selected = rows.filter(row => process.env.TARGET === 'all' || row.target === process.env.TARGET);
+            if (!selected.length) throw new Error(`Unsupported target: ${process.env.TARGET}`);
+            return {include: selected};
   build:
+    needs: select-targets
     name: tools ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
-          # SWARM Node needs a macOS miner: the node already builds for
-          # aarch64-apple-darwin, but privacy-miner did not, so the standard
-          # multi-core engine was unavailable on a Mac.
-          - target: aarch64-apple-darwin
-            runner: macos-14
-          - target: x86_64-apple-darwin
-            runner: macos-13
+      matrix: ${{ fromJSON(needs.select-targets.outputs.matrix) }}
     env:
       TARGET: ${{ matrix.target }}
     steps:
