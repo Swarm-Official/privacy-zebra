@@ -236,7 +236,7 @@ jobs:
           cp docs/privacy-miner.md docs/swarm-keytool.md "dist/${stage}/"
           cp genesis-check/GENESIS-HASH.txt "dist/${stage}/CI-SWARMTESTNET-GENESIS-HASH.txt"
 
-          rustc_vv="$(rustc -Vv | sed ':a;N;$!ba;s/\n/\\n/g')"
+          rustc_vv="$(rustc -Vv | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip())[1:-1])')"
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           printf '%s\n' \
             '{' \
@@ -255,6 +255,7 @@ jobs:
             "  \"workflow_run\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"," \
             "  \"built_at_utc\": \"${built_at}\"" \
             '}' > "dist/${stage}/build-manifest.json"
+          python3 -m json.tool "dist/${stage}/build-manifest.json" > /dev/null
           cat "dist/${stage}/build-manifest.json"
 
           cd dist
