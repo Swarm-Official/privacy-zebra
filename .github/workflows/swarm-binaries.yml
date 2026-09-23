@@ -20,6 +20,11 @@ name: SWARM native binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Native target (all or a Rust target triple)'
+        default: 'all'
+        type: string
   push:
     branches:
       - swarm-ci
@@ -41,7 +46,23 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  select-targets:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.select.outputs.result }}
+    steps:
+      - uses: actions/github-script@v7
+        id: select
+        env:
+          TARGET: ${{ inputs.target || 'all' }}
+        with:
+          script: |
+            const rows = [{"target":"x86_64-pc-windows-msvc","runner":"windows-latest","archive":"zip"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-22.04","archive":"tar.gz"},{"target":"aarch64-apple-darwin","runner":"macos-latest","archive":"tar.gz"},{"target":"x86_64-apple-darwin","runner":"macos-15-intel","archive":"tar.gz"}];
+            const selected = rows.filter(row => process.env.TARGET === 'all' || row.target === process.env.TARGET);
+            if (!selected.length) throw new Error(`Unsupported target: ${process.env.TARGET}`);
+            return {include: selected};
   build:
+    needs: select-targets
     name: zebrad ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     # A cold release build of Zebra (RocksDB + the zcash C++ script
@@ -49,18 +70,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
-            archive: zip
-          # Ubuntu 22.04 keeps the glibc floor low for older distributions.
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            runner: macos-latest
-            archive: tar.gz
+      matrix: ${{ fromJSON(needs.select-targets.outputs.matrix) }}
     env:
       TARGET: ${{ matrix.target }}
       ARCHIVE: ${{ matrix.archive }}
