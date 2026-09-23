@@ -255,7 +255,7 @@ jobs:
           cp "target/release/${bin_name}" "dist/${stage}/${bin_name}"
           cp LICENSE-APACHE LICENSE-MIT README.md "dist/${stage}/"
 
-          rustc_vv="$(rustc -Vv | sed ':a;N;$!ba;s/\n/\\n/g')"
+          rustc_vv="$(rustc -Vv | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip())[1:-1])')"
           zebrad_version="$("target/release/${bin_name}" --version | tr -d '\r')"
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -279,6 +279,7 @@ jobs:
             "  \"built_at_utc\": \"${built_at}\"" \
             '}' > "dist/${stage}/build-manifest.json"
 
+          python3 -m json.tool "dist/${stage}/build-manifest.json" > /dev/null
           cat "dist/${stage}/build-manifest.json"
 
           # Both archive formats hold the files at the archive root, with no
