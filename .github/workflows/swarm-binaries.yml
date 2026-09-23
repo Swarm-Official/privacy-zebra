@@ -1,10 +1,17 @@
 # SWARM workstream B: native `zebrad` binaries with the internal CPU miner.
 #
-# Builds the *unmodified* Zebra source at tag v6.3.0 for Windows (MSVC), Linux
-# and macOS, with default release features plus the optional `internal-miner`
-# feature. No Rust source, `Cargo.toml` or `Cargo.lock` is changed, and the
-# build uses `--locked`, so the result is consensus-identical to the official
-# v6.3.0 release that PrivacyTestnetV2 already runs.
+# Builds Zebra at tag v6.3.0 for Windows (MSVC), Linux and macOS, with default
+# release features plus the optional `internal-miner` feature. Consensus,
+# cryptographic, state and RPC code are unchanged from v6.3.0 and the build uses
+# `--locked`, so the result is consensus-identical to the official v6.3.0
+# release that PrivacyTestnetV2 already runs.
+#
+# One non-consensus change is carried on this branch, and only one: the mining
+# component (`zebrad/src/components/miner.rs`) counts how often the solver asks
+# for its next nonce and logs the measured rate every ten seconds. The node
+# reports no rate of its own, so a node app had nothing to show for a machine
+# mining with the internal miner. The counter and the log line cannot change
+# which blocks are produced, accepted or stored.
 #
 # Upstream lists `x86_64-pc-windows-msvc` as a Tier-3 platform (supported in
 # code, never built or tested by upstream CI), so the Windows job is the point

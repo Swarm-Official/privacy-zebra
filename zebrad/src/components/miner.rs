@@ -6,7 +6,15 @@
 //!   <https://github.com/zcash/zcash/blob/6fdd9f1b81d3b228326c9826fa10696fc516444b/src/miner.cpp#L865-L880>
 //! - move common code into zebra-chain or zebra-node-services and remove the RPC dependency.
 
-use std::{cmp::min, sync::Arc, thread::available_parallelism, time::Duration};
+use std::{
+    cmp::min,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    thread::available_parallelism,
+    time::{Duration, Instant},
+};
 
 use color_eyre::Report;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -52,6 +60,14 @@ pub const BLOCK_TEMPLATE_REFRESH_LIMIT: Duration = Duration::from_secs(2);
 /// This should be slightly longer than `BLOCK_TEMPLATE_REFRESH_LIMIT` to allow for template
 /// generation.
 pub const BLOCK_MINING_WAIT_TIME: Duration = Duration::from_secs(3);
+
+/// How often the internal miner reports the solver rate it measured.
+///
+/// The count is taken where the solver asks for its next nonce, so one unit is
+/// one real Equihash attempt and the difference over time is this process's own
+/// solution rate. It is logged in the same `N sol/s` shape the standalone
+/// miner uses, so an operator's tooling can read either miner with one parser.
+pub const SOLVER_RATE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Initialize the miner based on its config, and spawn a task for it.
 ///
@@ -400,6 +416,41 @@ where
     SyncStatus: ChainSyncStatus + Clone + Send + Sync + 'static,
     AddressBook: AddressBookPeers + Clone + Send + Sync + 'static,
 {
+    // Nonces this solver has asked for. Each request is one Equihash attempt,
+    // so the difference between two readings over the time between them is this
+    // solver's real rate. Nothing here estimates a rate from blocks found or
+    // from the difficulty: an unmeasured rate is reported as nothing at all.
+    let attempts = Arc::new(AtomicU64::new(0));
+    let reporter_attempts = attempts.clone();
+    let rate_reporter = tokio::spawn(async move {
+        let mut last_total = reporter_attempts.load(Ordering::Relaxed);
+        let mut last_at = Instant::now();
+
+        while !is_shutting_down() {
+            sleep(SOLVER_RATE_REPORT_INTERVAL).await;
+
+            let now = Instant::now();
+            let total = reporter_attempts.load(Ordering::Relaxed);
+            let elapsed = now.duration_since(last_at).as_secs_f64();
+            let attempts_this_window = total.saturating_sub(last_total);
+
+            // A window with no attempts is a solver that is not solving (a new
+            // template, a shutdown, a pause). Reporting zero would look like a
+            // measurement, so it is skipped.
+            if elapsed > 0.0 && attempts_this_window > 0 {
+                let solps = attempts_this_window as f64 / elapsed;
+                info!(
+                    solps,
+                    attempts = total,
+                    "internal miner rate: {solps:.0} sol/s (attempts {attempts_this_window} in {elapsed:.1}s)"
+                );
+            }
+
+            last_total = total;
+            last_at = now;
+        }
+    });
+
     // Shut down the task when the template sender is dropped, or Zebra shuts down.
     while template_receiver.has_changed().is_ok() && !is_shutting_down() {
         // Get the latest block template, and mark the current value as seen.
@@ -435,25 +486,34 @@ where
         // Set up the cancellation conditions for the miner.
         let mut cancel_receiver = template_receiver.clone();
         let old_header = *template.header;
-        let cancel_fn = move || match cancel_receiver.has_changed() {
-            // Guard against get_block_template() providing an identical header. This could happen
-            // if something irrelevant to the block data changes, the time was within 1 second, or
-            // there is a spurious channel change.
-            Ok(has_changed) => {
-                cancel_receiver.mark_as_seen();
+        // The solver asks for its next nonce through this closure, so one call
+        // here is one Equihash attempt by this solver. Counting them is the only
+        // honest way to know this machine's rate: nothing else in the node
+        // observes the solver.
+        let attempts_for_solver = attempts.clone();
+        let cancel_fn = move || {
+            attempts_for_solver.fetch_add(1, Ordering::Relaxed);
 
-                // We only need to check header equality, because the block data is bound to the
-                // header.
-                if has_changed
-                    && Some(old_header) != cancel_receiver.cloned_watch_data().map(|b| *b.header)
-                {
-                    Err(SolverCancelled)
-                } else {
-                    Ok(())
+            match cancel_receiver.has_changed() {
+                // Guard against get_block_template() providing an identical header. This could happen
+                // if something irrelevant to the block data changes, the time was within 1 second, or
+                // there is a spurious channel change.
+                Ok(has_changed) => {
+                    cancel_receiver.mark_as_seen();
+
+                    // We only need to check header equality, because the block data is bound to the
+                    // header.
+                    if has_changed
+                        && Some(old_header) != cancel_receiver.cloned_watch_data().map(|b| *b.header)
+                    {
+                        Err(SolverCancelled)
+                    } else {
+                        Ok(())
+                    }
                 }
+                // If the sender was dropped, we're likely shutting down, so cancel the solver.
+                Err(_sender_dropped) => Err(SolverCancelled),
             }
-            // If the sender was dropped, we're likely shutting down, so cancel the solver.
-            Err(_sender_dropped) => Err(SolverCancelled),
         };
 
         // Mine at least one block using the equihash solver.
@@ -537,6 +597,9 @@ where
 
         }
     }
+
+    // Stop reporting the rate as soon as this solver stops.
+    rate_reporter.abort();
 
     Ok(())
 }
