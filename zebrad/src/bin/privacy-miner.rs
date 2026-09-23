@@ -17,7 +17,7 @@ mod app {
     use std::{
         path::PathBuf,
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc,
         },
         time::{Duration, Instant},
@@ -327,8 +327,16 @@ It is not a mainnet launch genesis or final economic configuration.";
             let cancel = Arc::new(AtomicBool::new(false));
             let solver_cancel = cancel.clone();
             let solver_stop = stopped.clone();
+            // One call to this closure is one Equihash attempt by this solver:
+            // the solver asks for its next nonce through it. Counting the calls
+            // is the only honest way to know the rate this machine is achieving,
+            // and it is reported below in the same `N sol/s` shape the node's own
+            // internal miner uses.
+            let attempts = Arc::new(AtomicU64::new(0));
+            let solver_attempts = attempts.clone();
             let mut solver = tokio::task::spawn_blocking(move || {
                 Solution::solve(header, || {
+                    solver_attempts.fetch_add(1, Ordering::Relaxed);
                     if solver_cancel.load(Ordering::Relaxed) || solver_stop.load(Ordering::Relaxed)
                     {
                         Err(SolverCancelled)
@@ -338,11 +346,31 @@ It is not a mainnet launch genesis or final economic configuration.";
                 })
             });
             let started = Instant::now();
+            let mut last_rate_report = Instant::now();
+            let mut attempts_at_last_report = 0u64;
             let mut poll = tokio::time::interval(Duration::from_secs(2));
             let solved = loop {
                 tokio::select! {
                     result = &mut solver => { break result?; }
                     _ = poll.tick() => {
+                        // What this solver actually measured, once every ten
+                        // seconds. A window with no attempts prints nothing:
+                        // zero would look like a measurement.
+                        let since = last_rate_report.elapsed().as_secs_f64();
+                        if since >= 10.0 {
+                            let total = attempts.load(Ordering::Relaxed);
+                            let tried = total.saturating_sub(attempts_at_last_report);
+                            if tried > 0 {
+                                println!(
+                                    "Mining rate {:.0} sol/s (attempts {} in {:.1}s)",
+                                    tried as f64 / since,
+                                    tried,
+                                    since
+                                );
+                            }
+                            attempts_at_last_report = total;
+                            last_rate_report = Instant::now();
+                        }
                         if stopped.load(Ordering::Relaxed) || started.elapsed() > Duration::from_secs(60) {
                             cancel.store(true, Ordering::Relaxed);
                         } else {
