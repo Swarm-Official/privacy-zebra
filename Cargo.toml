@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor/zcash_address", "vendor/zcash_protocol"]
 members = [
         "zebrad",
         "zebra-chain",
@@ -25,6 +26,10 @@ homepage = "https://zfnd.org/zebra/"
 keywords = ["zebra", "zcash"]
 rust-version = "1.88"
 edition = "2021"
+
+[patch.crates-io]
+zcash_address = { path = "vendor/zcash_address" }
+zcash_protocol = { path = "vendor/zcash_protocol" }
 
 # `cargo release` settings
 

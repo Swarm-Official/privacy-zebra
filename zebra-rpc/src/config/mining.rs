@@ -147,6 +147,24 @@ pub fn default_miner_address(kind: NetworkKind, addr_type: &MinerAddressType) ->
     MINER_ADDRESS[&kind][addr_type]
 }
 
+#[cfg(test)]
+mod swarm_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn swarm_and_legacy_miner_addresses_have_identical_receivers() {
+        let legacy = default_miner_address(NetworkKind::Testnet, &MinerAddressType::Unified);
+        let parsed: ZcashAddress = legacy.parse().expect("the built-in test vector is valid");
+        let canonical = parsed.to_string();
+        assert!(canonical.starts_with("swarm1"));
+        assert_eq!(canonical.parse::<ZcashAddress>(), Ok(parsed));
+        assert!(canonical
+            .replacen("swarm", "SwarM", 1)
+            .parse::<ZcashAddress>()
+            .is_err());
+    }
+}
+
 lazy_static::lazy_static! {
     static ref MINER_ADDRESS: HashMap<NetworkKind, HashMap<MinerAddressType, &'static str>> = [
         (NetworkKind::Mainnet, [

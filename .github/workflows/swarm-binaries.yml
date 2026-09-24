@@ -137,6 +137,9 @@ jobs:
           cargo -V
           cargo tree --locked -p zebrad -e no-dev -i equihash || true
 
+      - name: Test SWARM and legacy mining address compatibility
+        run: cargo test --locked -p zebra-rpc --lib swarm_prefix_tests
+
       - name: Build zebrad with the internal miner
         run: |
           set -euo pipefail
