@@ -26,12 +26,14 @@
 //!
 //! Zebra has no wallet transaction builder, and the `zcash_primitives` builder's transparent
 //! input support is limited to keys it can sign for itself, so it cannot spend an arbitrary P2SH
-//! redeem script. This file therefore takes the smaller path: it builds the Orchard bundle with
-//! the `orchard` crate (real prover), encodes it in the consensus wire format, and lets Zebra's own
-//! `ZcashDeserialize` impl parse it into [`zebra_chain::orchard::ShieldedData`]. The transparent
-//! side is assembled directly in Zebra types and signed with the T1 helpers. Nothing here invents
-//! a serializer, a sighash or a proof system: the bundle bytes go through Zebra's parser, the
-//! sighash comes from Zebra's `SigHasher`, and the proof is verified by `zebra-consensus`.
+//! redeem script. The smaller path — build the bundle with the `orchard` crate (real prover),
+//! encode it in the consensus wire format, and let Zebra's own `ZcashDeserialize` impl parse it
+//! into [`zebra_chain::orchard::ShieldedData`] — now lives in
+//! [`swarm_treasury::shielded`](../../swarm-treasury/src/shielded.rs), where the custody tool
+//! (task T3) uses the same code. This file builds the published fixture material, drives that
+//! construction, and runs the result past the verifiers. Nothing here invents a serializer, a
+//! sighash or a proof system: the bundle bytes go through Zebra's parser, the sighash comes from
+//! Zebra's `SigHasher`, and the proof is verified by `zebra-consensus`.
 //!
 //! The ZIP-244 signature digest excludes proofs and signatures, so the bundle's actions are fixed
 //! before the sighash is taken and the proof and signatures are filled in afterwards. That
@@ -64,30 +66,25 @@
 use std::{
     collections::HashMap,
     future::Future,
-    io::Cursor,
     pin::Pin,
     sync::{Arc, OnceLock},
     task::{Context, Poll},
 };
 
 use chrono::{DateTime, TimeZone, Utc};
-use orchard::{
-    builder::{Builder as OrchardBuilder, BundleType},
-    bundle::{Authorization as OrchardAuthorization, Bundle as OrchardBundle, BundleVersion},
-    circuit::ProvingKey,
-    keys::{FullViewingKey, IncomingViewingKey, Scope, SpendingKey},
-    value::NoteValue,
-    Anchor,
-};
-use rand::{rngs::StdRng, SeedableRng};
+use orchard::keys::{FullViewingKey, IncomingViewingKey, Scope, SpendingKey};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+use swarm_treasury::{
+    script as treasury_script,
+    shielded::{self, Pool, WireBundle},
+};
 use tower::{Service, ServiceExt};
 
 use zebra_chain::{
     amount::{Amount, NonNegative},
     block::Height,
     parameters::{testnet::Parameters, Network, NetworkUpgrade},
-    serialization::{DateTime32, ZcashDeserialize},
+    serialization::DateTime32,
     transaction::{self, zip317, HashType, LockTime, Transaction, UnminedTx},
     transparent::{
         self, CoinbaseSpendRestriction, OrderedUtxo, Utxo, MIN_TRANSPARENT_COINBASE_MATURITY,
@@ -118,21 +115,6 @@ const KNOWN_REDEEM_SCRIPT: &str = concat!(
 
 /// The `swarm-keytool` published script hash for [`KNOWN_REDEEM_SCRIPT`].
 const KNOWN_SCRIPT_HASH: &str = "15fc0754e73eb85d1cbce08786fadb7320ecb8dc";
-
-/// `OP_0`, the CHECKMULTISIG dummy element.
-const OP_0: u8 = 0x00;
-/// `OP_PUSHDATA1`: the next byte is the length of the data to push.
-const OP_PUSHDATA1: u8 = 0x4c;
-/// The largest length byte that is a direct push rather than an opcode.
-const MAX_DIRECT_PUSH: usize = 75;
-/// `OP_HASH160`.
-const OP_HASH160: u8 = 0xa9;
-/// `OP_EQUAL`.
-const OP_EQUAL: u8 = 0x87;
-/// `OP_CHECKMULTISIG`.
-const OP_CHECKMULTISIG: u8 = 0xae;
-/// The canonical `SIGHASH_ALL` byte appended to each DER signature in a scriptSig.
-const SIGHASH_ALL_BYTE: u8 = 0x01;
 
 /// The **disposable** Orchard spending key used as the disbursement recipient.
 ///
@@ -174,12 +156,10 @@ const V6_CREATED_HEIGHT: Height = Height(4_200_000);
 /// The number of blocks a transparent coinbase output must age before it can be spent.
 const MATURITY: u32 = MIN_TRANSPARENT_COINBASE_MATURITY as u32;
 
-// -- small script helpers (the subset of the task T1 helpers this file needs) -
+// -- the fixture material ----------------------------------------------------
 //
-// These are duplicated rather than shared: an integration test target cannot import another
-// crate's integration test module, and introducing a shared test-support crate would add a new
-// cross-crate dependency for four short functions. Task T1's file is left byte-identical so its
-// gate keeps passing.
+// The script layer itself now lives in `swarm-treasury` (task T3): this file builds the published
+// fixture keys and hands them to the same functions the tool uses, so the two cannot drift.
 
 /// Returns the secret key for the public test scalar `scalar`.
 fn fixture_secret_key(scalar: u8) -> SecretKey {
@@ -194,41 +174,23 @@ fn fixture_public_key(scalar: u8) -> [u8; 33] {
     PublicKey::from_secret_key(&secp, &fixture_secret_key(scalar)).serialize()
 }
 
-/// Appends a minimal data push of `data` to `script`.
-///
-/// The 105-byte 2-of-3 redeem script cannot use a one-byte direct push, because the length byte
-/// 105 (`0x69`) is an opcode; `OP_PUSHDATA1` is required.
-fn push_data(script: &mut Vec<u8>, data: &[u8]) {
-    if data.len() <= MAX_DIRECT_PUSH {
-        script.push(u8::try_from(data.len()).expect("checked against MAX_DIRECT_PUSH"));
-    } else {
-        script.push(OP_PUSHDATA1);
-        script.push(u8::try_from(data.len()).expect("test pushes are far below 256 bytes"));
-    }
-    script.extend_from_slice(data);
-}
-
 /// Builds the published 2-of-3 `OP_2 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG` redeem script.
 ///
 /// The key order is the order the published P2SH address commits to; no BIP-67 sorting is applied.
 fn treasury_redeem_script() -> Vec<u8> {
-    let mut script = vec![0x50 + 2];
-    for scalar in FIXTURE_SCALARS {
-        let public_key = fixture_public_key(scalar);
-        script.push(33);
-        script.extend_from_slice(&public_key);
-    }
-    script.push(0x50 + 3);
-    script.push(OP_CHECKMULTISIG);
-    script
+    let keys: Vec<[u8; 33]> = FIXTURE_SCALARS
+        .iter()
+        .copied()
+        .map(fixture_public_key)
+        .collect();
+    treasury_script::redeem_script(2, &keys).expect("the published 2-of-3 policy is valid")
 }
 
 /// Builds the P2SH locking script `OP_HASH160 <published script hash> OP_EQUAL`.
 fn treasury_lock_script() -> Vec<u8> {
-    let mut script = vec![OP_HASH160, 20];
-    script.extend_from_slice(&hex::decode(KNOWN_SCRIPT_HASH).expect("hard-coded hash is hex"));
-    script.push(OP_EQUAL);
-    script
+    let mut script_hash = [0u8; 20];
+    script_hash.copy_from_slice(&hex::decode(KNOWN_SCRIPT_HASH).expect("hard-coded hash is hex"));
+    treasury_script::p2sh_lock_script(script_hash)
 }
 
 /// Builds a non-negative [`Amount`] from a zatoshi count.
@@ -244,21 +206,14 @@ fn der_signature(scalar: u8, sighash: &[u8; 32]) -> Vec<u8> {
     let message = Message::from_digest(*sighash);
     let signature = secp.sign_ecdsa(&message, &fixture_secret_key(scalar));
     let mut der = signature.serialize_der().to_vec();
-    der.push(SIGHASH_ALL_BYTE);
+    der.push(treasury_script::SIGHASH_ALL_BYTE);
     der
 }
 
 /// Builds a P2SH multisig scriptSig from signatures in redeem-script key order.
-///
-/// `OP_0` absorbs the off-by-one element CHECKMULTISIG pops and discards; the redeem script is
-/// pushed last.
 fn multisig_script_sig(signatures: &[Vec<u8>]) -> Vec<u8> {
-    let mut script_sig = vec![OP_0];
-    for signature in signatures {
-        push_data(&mut script_sig, signature);
-    }
-    push_data(&mut script_sig, &treasury_redeem_script());
-    script_sig
+    treasury_script::multisig_script_sig(signatures, &treasury_redeem_script())
+        .expect("the fixture signatures fit in a scriptSig")
 }
 
 // -- the network fixture -----------------------------------------------------
@@ -341,150 +296,6 @@ type FixtureMempool = tower::buffer::Buffer<
     zebra_node_services::mempool::Request,
 >;
 
-// -- the Orchard bundle wire encoding ----------------------------------------
-
-/// One Action description's non-authorizing fields, in consensus wire order.
-#[derive(Clone, Debug)]
-struct WireAction {
-    cv: [u8; 32],
-    nullifier: [u8; 32],
-    rk: [u8; 32],
-    cmx: [u8; 32],
-    ephemeral_key: [u8; 32],
-    enc_ciphertext: [u8; 580],
-    out_ciphertext: [u8; 80],
-}
-
-/// A whole Orchard-protocol bundle in the consensus wire format.
-///
-/// The encoding is the one Zebra's `deserialize_orchard_shielded_data` reads, so building these
-/// bytes and handing them to Zebra's parser is how a real bundle reaches [`Transaction`] here.
-#[derive(Clone, Debug)]
-struct WireBundle {
-    actions: Vec<WireAction>,
-    flag_byte: u8,
-    value_balance: i64,
-    anchor: [u8; 32],
-    proof: Vec<u8>,
-    spend_auth_sigs: Vec<[u8; 64]>,
-    binding_sig: [u8; 64],
-}
-
-/// Writes a Bitcoin-style CompactSize prefix.
-fn write_compact_size(bytes: &mut Vec<u8>, value: usize) {
-    if value < 253 {
-        bytes.push(value as u8);
-    } else if value <= u16::MAX as usize {
-        bytes.push(0xfd);
-        bytes.extend_from_slice(&(value as u16).to_le_bytes());
-    } else {
-        bytes.push(0xfe);
-        bytes.extend_from_slice(&(value as u32).to_le_bytes());
-    }
-}
-
-impl WireBundle {
-    /// Extracts the non-authorizing fields of `bundle` and pairs them with the given proof and
-    /// signatures.
-    ///
-    /// The proof and the signatures are supplied separately because the ZIP-244 signature digest
-    /// excludes both: the fixture first builds this with placeholders to take the sighash, then
-    /// rebuilds it with the real proof and signatures.
-    fn new<A: OrchardAuthorization>(
-        bundle: &OrchardBundle<A, i64>,
-        proof: Vec<u8>,
-        spend_auth_sigs: Vec<[u8; 64]>,
-        binding_sig: [u8; 64],
-    ) -> Self {
-        let actions = bundle
-            .actions()
-            .iter()
-            .map(|action| {
-                let encrypted_note = action.encrypted_note();
-                WireAction {
-                    cv: action.cv_net().to_bytes(),
-                    nullifier: action.nullifier().to_bytes(),
-                    rk: <[u8; 32]>::from(action.rk()),
-                    cmx: action.cmx().to_bytes(),
-                    ephemeral_key: encrypted_note.epk_bytes,
-                    enc_ciphertext: encrypted_note.enc_ciphertext,
-                    out_ciphertext: encrypted_note.out_ciphertext,
-                }
-            })
-            .collect();
-
-        WireBundle {
-            actions,
-            flag_byte: bundle.flag_byte(),
-            value_balance: *bundle.value_balance(),
-            anchor: bundle.anchor().to_bytes(),
-            proof,
-            spend_auth_sigs,
-            binding_sig,
-        }
-    }
-
-    /// The bundle's consensus wire encoding, as it appears inside a v5 or v6 transaction.
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        write_compact_size(&mut bytes, self.actions.len());
-        for action in &self.actions {
-            bytes.extend_from_slice(&action.cv);
-            bytes.extend_from_slice(&action.nullifier);
-            bytes.extend_from_slice(&action.rk);
-            bytes.extend_from_slice(&action.cmx);
-            bytes.extend_from_slice(&action.ephemeral_key);
-            bytes.extend_from_slice(&action.enc_ciphertext);
-            bytes.extend_from_slice(&action.out_ciphertext);
-        }
-
-        bytes.push(self.flag_byte);
-        bytes.extend_from_slice(&self.value_balance.to_le_bytes());
-        bytes.extend_from_slice(&self.anchor);
-        write_compact_size(&mut bytes, self.proof.len());
-        bytes.extend_from_slice(&self.proof);
-        for signature in &self.spend_auth_sigs {
-            bytes.extend_from_slice(signature);
-        }
-        bytes.extend_from_slice(&self.binding_sig);
-
-        bytes
-    }
-
-    /// Parses these bytes with Zebra's own v5 Orchard bundle deserializer.
-    fn to_orchard_shielded_data(&self) -> zebra_chain::orchard::ShieldedData {
-        let bytes = self.to_bytes();
-        let mut reader = Cursor::new(bytes);
-        Option::<zebra_chain::orchard::ShieldedData>::zcash_deserialize(&mut reader)
-            .expect("the fixture bundle is a valid v5 Orchard bundle encoding")
-            .expect("the fixture bundle has at least one action")
-    }
-
-    /// Parses these bytes with Zebra's own Ironwood bundle deserializer.
-    fn to_ironwood_shielded_data(&self) -> zebra_chain::ironwood::ShieldedData {
-        let bytes = self.to_bytes();
-        let mut reader = Cursor::new(bytes);
-        Option::<zebra_chain::ironwood::ShieldedData>::zcash_deserialize(&mut reader)
-            .expect("the fixture bundle is a valid Ironwood bundle encoding")
-            .expect("the fixture bundle has at least one action")
-    }
-}
-
-// -- proving keys ------------------------------------------------------------
-
-/// The proving key for the pre-NU6.2 Orchard Action circuit, built once per test binary.
-fn pre_nu6_2_proving_key() -> &'static ProvingKey {
-    static KEY: OnceLock<ProvingKey> = OnceLock::new();
-    KEY.get_or_init(|| ProvingKey::build(BundleVersion::orchard_insecure_v1().circuit_version()))
-}
-
-/// The proving key for the NU6.3 Action circuit, built once per test binary.
-fn nu6_3_proving_key() -> &'static ProvingKey {
-    static KEY: OnceLock<ProvingKey> = OnceLock::new();
-    KEY.get_or_init(|| ProvingKey::build(BundleVersion::ironwood_v3().circuit_version()))
-}
-
 // -- the recipient -----------------------------------------------------------
 
 /// The disposable recipient's Orchard spending key.
@@ -521,50 +332,14 @@ fn disbursement_memo() -> [u8; 512] {
 
 // -- the spend fixture -------------------------------------------------------
 
-/// Which transaction format and shielded pool a fixture uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pool {
-    /// A v5 transaction at NU5, paying into the Orchard pool.
-    V5Orchard,
-    /// A v6 transaction at NU6.3, paying into the Ironwood pool.
-    ///
-    /// From NU6.3 the Orchard pool is frozen against new inflows
-    /// (`zebra_consensus::transaction::check::orchard_value_balance_non_negative`), so a v6
-    /// disbursement of transparent treasury value must target Ironwood.
-    V6Ironwood,
-}
-
-impl Pool {
-    /// The network upgrade the fixture's spend happens under.
-    fn network_upgrade(self) -> NetworkUpgrade {
-        match self {
-            Pool::V5Orchard => NetworkUpgrade::Nu5,
-            Pool::V6Ironwood => NetworkUpgrade::Nu6_3,
-        }
-    }
-
-    /// The `orchard` crate bundle version to build with.
-    fn bundle_version(self) -> BundleVersion {
-        match self {
-            Pool::V5Orchard => BundleVersion::orchard_insecure_v1(),
-            Pool::V6Ironwood => BundleVersion::ironwood_v3(),
-        }
-    }
-
-    /// The proving key whose circuit matches [`Self::bundle_version`].
-    fn proving_key(self) -> &'static ProvingKey {
-        match self {
-            Pool::V5Orchard => pre_nu6_2_proving_key(),
-            Pool::V6Ironwood => nu6_3_proving_key(),
-        }
-    }
-
-    /// The height at which the fixture's treasury coinbase output is created.
-    fn created_height(self) -> Height {
-        match self {
-            Pool::V5Orchard => V5_CREATED_HEIGHT,
-            Pool::V6Ironwood => V6_CREATED_HEIGHT,
-        }
+/// The height at which a fixture's treasury coinbase output is created.
+///
+/// [`Pool`] itself, its bundle versions and its proving keys now come from `swarm-treasury`
+/// (task T3); only the heights are a property of this fixture.
+fn created_height(pool: Pool) -> Height {
+    match pool {
+        Pool::V5Orchard => V5_CREATED_HEIGHT,
+        Pool::V6Ironwood => V6_CREATED_HEIGHT,
     }
 }
 
@@ -589,7 +364,7 @@ struct SpendFixture {
 impl SpendFixture {
     /// The height at which the fixture's coinbase output was created.
     fn created_height(&self) -> Height {
-        self.pool.created_height()
+        created_height(self.pool)
     }
 
     /// The first height at which the fixture's coinbase output is mature.
@@ -609,39 +384,14 @@ impl SpendFixture {
 
     /// Builds the transaction from a given bundle encoding and scriptSig.
     fn transaction_with(&self, wire: &WireBundle, script_sig: &[u8]) -> Transaction {
-        let inputs = vec![transparent::Input::PrevOut {
-            outpoint: self.outpoint,
-            unlock_script: transparent::Script::new(script_sig),
-            sequence: u32::MAX,
-        }];
-        let consensus_branch_id = self
-            .pool
-            .network_upgrade()
-            .branch_id()
-            .expect("NU5 and NU6.3 both have branch IDs");
-        let expiry_height = Height(self.mature_height().0 + 100);
-
-        match self.pool {
-            Pool::V5Orchard => Transaction::V5 {
-                consensus_branch_id,
-                lock_time: LockTime::unlocked(),
-                expiry_height,
-                inputs,
-                outputs: self.transparent_outputs.clone(),
-                sapling_shielded_data: None,
-                orchard_shielded_data: Some(wire.to_orchard_shielded_data()),
-            },
-            Pool::V6Ironwood => Transaction::V6 {
-                consensus_branch_id,
-                lock_time: LockTime::unlocked(),
-                expiry_height,
-                inputs,
-                outputs: self.transparent_outputs.clone(),
-                sapling_shielded_data: None,
-                orchard_shielded_data: None,
-                ironwood_shielded_data: Some(wire.to_ironwood_shielded_data()),
-            },
-        }
+        fixture_transaction(
+            self.pool,
+            self.outpoint,
+            &self.transparent_outputs,
+            Height(self.mature_height().0 + 100),
+            wire,
+            script_sig,
+        )
     }
 
     /// The valid, fully authorized disbursement transaction.
@@ -744,6 +494,59 @@ fn block_time() -> DateTime<Utc> {
         .expect("the fixture timestamp is valid")
 }
 
+/// Builds the fixture transaction from a bundle encoding and a scriptSig.
+///
+/// The shielded bundle's wire encoding and its parse back into Zebra types come from
+/// `swarm-treasury` (task T3). The transparent side is assembled here rather than by
+/// `swarm_treasury::spend::assemble_transaction`, because this fixture deliberately builds the
+/// invalid transparent-change variant, and the tool has no code path that can.
+fn fixture_transaction(
+    pool: Pool,
+    outpoint: transparent::OutPoint,
+    transparent_outputs: &[transparent::Output],
+    expiry_height: Height,
+    wire: &WireBundle,
+    script_sig: &[u8],
+) -> Transaction {
+    let inputs = vec![transparent::Input::PrevOut {
+        outpoint,
+        unlock_script: transparent::Script::new(script_sig),
+        sequence: u32::MAX,
+    }];
+    let consensus_branch_id = pool
+        .network_upgrade()
+        .branch_id()
+        .expect("NU5 and NU6.3 both have branch IDs");
+
+    match pool {
+        Pool::V5Orchard => Transaction::V5 {
+            consensus_branch_id,
+            lock_time: LockTime::unlocked(),
+            expiry_height,
+            inputs,
+            outputs: transparent_outputs.to_vec(),
+            sapling_shielded_data: None,
+            orchard_shielded_data: Some(
+                wire.to_orchard_shielded_data()
+                    .expect("the fixture bundle is a valid v5 Orchard bundle encoding"),
+            ),
+        },
+        Pool::V6Ironwood => Transaction::V6 {
+            consensus_branch_id,
+            lock_time: LockTime::unlocked(),
+            expiry_height,
+            inputs,
+            outputs: transparent_outputs.to_vec(),
+            sapling_shielded_data: None,
+            orchard_shielded_data: None,
+            ironwood_shielded_data: Some(
+                wire.to_ironwood_shielded_data()
+                    .expect("the fixture bundle is a valid Ironwood bundle encoding"),
+            ),
+        },
+    }
+}
+
 /// Builds, proves and authorizes one treasury disbursement.
 ///
 /// The ordering matters and is asserted rather than assumed:
@@ -754,56 +557,8 @@ fn block_time() -> DateTime<Utc> {
 /// 4. re-encode with the real proof and signatures, and check the sighash is unchanged;
 /// 5. sign the transparent input over the final transaction with two of the three fixture scalars.
 fn build_spend(pool: Pool, transparent_change: Option<u64>) -> SpendFixture {
-    let mut rng = StdRng::seed_from_u64(0x5741524d_u64);
-
     let change = transparent_change.unwrap_or(0);
     let note_value = COLLECTOR_VALUE - APPROVED_FEE - change;
-
-    let bundle_version = pool.bundle_version();
-    let mut builder = OrchardBuilder::new(
-        // The transaction's shape is already public (one transparent input, no transparent
-        // outputs), so the bundle is not padded beyond the one-action consensus minimum.
-        BundleType::UNPADDED,
-        bundle_version,
-        bundle_version.default_flags(),
-        Anchor::empty_tree(),
-    )
-    .expect("the fixture bundle version and flags are consistent");
-
-    builder
-        .add_output(
-            None,
-            recipient_address(),
-            NoteValue::from_raw(note_value),
-            disbursement_memo(),
-        )
-        .expect("the fixture bundle enables outputs and cross-address transfers");
-
-    let (unproven, _metadata) = builder
-        .build::<i64>(&mut rng)
-        .expect("the fixture bundle builds")
-        .expect("the fixture bundle has an output, so it is produced");
-
-    assert_eq!(
-        unproven.actions().len(),
-        1,
-        "an unpadded one-output bundle must have exactly one action",
-    );
-    assert_eq!(
-        *unproven.value_balance(),
-        -i64::try_from(note_value).expect("fixture amounts fit in i64"),
-        "value flowing into the shielded pool is a negative value balance",
-    );
-
-    // Step 2: placeholder authorization, so the sighash can be taken before the proof exists.
-    let placeholder_proof =
-        vec![0u8; orchard::Proof::expected_proof_size(unproven.actions().len())];
-    let placeholder = WireBundle::new(
-        &unproven,
-        placeholder_proof,
-        vec![[0u8; 64]; unproven.actions().len()],
-        [0u8; 64],
-    );
 
     let transparent_outputs = match transparent_change {
         // The policy under test: whole selected UTXOs minus the fee to the shielded recipient,
@@ -814,56 +569,54 @@ fn build_spend(pool: Pool, transparent_change: Option<u64>) -> SpendFixture {
             lock_script: transparent::Script::new(&treasury_lock_script()),
         }],
     };
+    let outpoint = transparent::OutPoint {
+        hash: transaction::Hash([0x33u8; 32]),
+        index: 0,
+    };
+    let previous_output = transparent::Output {
+        value: amount(COLLECTOR_VALUE),
+        lock_script: transparent::Script::new(&treasury_lock_script()),
+    };
+    let previous_outputs = Arc::new(vec![previous_output.clone()]);
+    let expiry_height = Height(created_height(pool).0 + MATURITY + 100);
+
+    // Steps 1 to 3 are `swarm_treasury::shielded::build_bundle`: it builds the unproven bundle,
+    // asks this closure for the ZIP-244 sighash of the transaction that carries it with a
+    // placeholder authorization, and then proves and signs the bundle over that sighash.
+    let (wire, shielded_sighash) = shielded::build_bundle(
+        pool,
+        recipient_address(),
+        note_value,
+        disbursement_memo(),
+        // The seed the original fixture used, so the bundle is byte-for-byte reproducible.
+        fixture_rng_seed(),
+        |placeholder| {
+            let placeholder_transaction = fixture_transaction(
+                pool,
+                outpoint,
+                &transparent_outputs,
+                expiry_height,
+                placeholder,
+                &[],
+            );
+            let sighasher = placeholder_transaction
+                .sighasher(pool.network_upgrade(), previous_outputs.clone())
+                .expect("the fixture transaction's branch ID matches its network upgrade");
+            Ok(*sighasher.sighash(HashType::ALL, None).as_ref())
+        },
+    )
+    .expect("the fixture bundle builds, proves and signs");
 
     let mut fixture = SpendFixture {
         pool,
-        outpoint: transparent::OutPoint {
-            hash: transaction::Hash([0x33u8; 32]),
-            index: 0,
-        },
-        previous_output: transparent::Output {
-            value: amount(COLLECTOR_VALUE),
-            lock_script: transparent::Script::new(&treasury_lock_script()),
-        },
+        outpoint,
+        previous_output,
         transparent_outputs,
-        wire: placeholder,
-        shielded_sighash: [0u8; 32],
+        wire,
+        shielded_sighash,
         script_sig: Vec::new(),
         note_value,
     };
-
-    let placeholder_transaction = fixture.transaction_with(&fixture.wire, &[]);
-    let shielded_sighash: [u8; 32] = {
-        let sighasher = placeholder_transaction
-            .sighasher(pool.network_upgrade(), fixture.previous_outputs())
-            .expect("the fixture transaction's branch ID matches its network upgrade");
-        *sighasher.sighash(HashType::ALL, None).as_ref()
-    };
-
-    // Step 3: the real proof and the real signatures.
-    //
-    // The bundle has no real spends, so no spend authorizing key is supplied: the builder's
-    // fabricated dummy spend is signed by `prepare` with the dummy's own key.
-    let authorized = unproven
-        .create_proof(pool.proving_key(), &mut rng)
-        .expect("the fixture bundle proves under the matching circuit key")
-        .apply_signatures(&mut rng, shielded_sighash, &[])
-        .expect("the fixture bundle has no spends needing an external signature");
-
-    let spend_auth_sigs = authorized
-        .actions()
-        .iter()
-        .map(|action| <[u8; 64]>::from(action.authorization()))
-        .collect();
-    let authorized_wire = WireBundle::new(
-        &authorized,
-        authorized.authorization().proof().as_ref().to_vec(),
-        spend_auth_sigs,
-        <[u8; 64]>::from(authorized.authorization().binding_signature()),
-    );
-
-    fixture.wire = authorized_wire;
-    fixture.shielded_sighash = shielded_sighash;
 
     // Step 4: the ZIP-244 signature digest excludes the proof and the signatures, so filling them
     // in must not have moved the sighash. Everything else in this file depends on that.
@@ -875,7 +628,7 @@ fn build_spend(pool: Pool, transparent_change: Option<u64>) -> SpendFixture {
         *sighasher.sighash(HashType::ALL, None).as_ref()
     };
     assert_eq!(
-        reconfirmed_sighash, shielded_sighash,
+        reconfirmed_sighash, fixture.shielded_sighash,
         "the ZIP-244 signature digest must not commit to the proof or the signatures",
     );
 
@@ -889,6 +642,13 @@ fn build_spend(pool: Pool, transparent_change: Option<u64>) -> SpendFixture {
     ]);
 
     fixture
+}
+
+/// The bundle randomness seed, fixed so a failure here is reproducible.
+fn fixture_rng_seed() -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&0x5741_524d_u64.to_le_bytes());
+    seed
 }
 
 /// The v5 / NU5 treasury disbursement with no transparent output: the policy under test.
