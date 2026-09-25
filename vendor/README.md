@@ -31,7 +31,8 @@ node, indexer and wallet releases and live testnet payment verification.
 
 `zcash_protocol` gained `NetworkType::SwarmMain`, the SWARM production network
 identity, with its constants in `src/constants/swarm_mainnet.rs`. The Bech32m HRP
-root there is PROVISIONAL (`svm`, pending the owner's `svm` vs `swm` confirmation)
+root there is `swm`, owner-confirmed on 2026-09-25 (the earlier provisional `svm` was
+never published),
 and every SWARM production HRP is derived from that one literal.
 
 `zcash_transparent` 0.10.0 is vendored unchanged except for one function: its

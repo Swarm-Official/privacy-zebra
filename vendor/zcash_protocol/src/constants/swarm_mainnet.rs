@@ -13,23 +13,24 @@
 
 /// The **single** source of truth for the SWARM production Bech32m HRP root.
 ///
-/// PROVISIONAL: the owner wrote "SVM" but confirmation of `svm` vs `swm` is still
-/// pending. Every SWARM production HRP in this module is derived from this macro, so
-/// flipping the choice is a one-line change to the literal below.
+/// CONFIRMED by the owner on 2026-09-25 as `swm`, matching the SWM ticker. The earlier
+/// `svm` was provisional and is superseded; it was never published, so nothing encoded
+/// with it exists to migrate. Every SWARM production HRP in this module is derived from
+/// this macro, so the root is still a one-line change.
 ///
 /// The root must be lowercase US-ASCII, must not contain `1`, and must be at most 16
 /// characters (the ZIP 316 padding length). `swarm_mainnet_hrp_root_is_usable` in the
 /// tests of this crate asserts those properties.
 macro_rules! swarm_mainnet_hrp_root {
     () => {
-        "svm"
+        "swm"
     };
 }
 
 /// The SWARM production Bech32m HRP root, as a constant.
 ///
-/// PROVISIONAL, see the `swarm_mainnet_hrp_root!` macro above. This is the one value
-/// to change when the owner confirms `svm` vs `swm`.
+/// `swm`, owner-confirmed on 2026-09-25. See the `swarm_mainnet_hrp_root!` macro above:
+/// this is the one value the whole module derives from.
 pub const HRP_ROOT: &str = swarm_mainnet_hrp_root!();
 
 /// The SWARM production coin type, as it will be registered in [SLIP 44].
@@ -42,7 +43,7 @@ pub const COIN_TYPE: u32 = 9767;
 
 /// The HRP for a Bech32-encoded SWARM production Sapling `ExtendedSpendingKey`.
 ///
-/// PROVISIONAL. SWARM testnet did not fork the Sapling HRPs away from upstream
+/// SWARM testnet did not fork the Sapling HRPs away from upstream
 /// (it still uses `secret-extended-key-test`), so there is no existing SWARM
 /// derivation to mirror. This follows the upstream shape
 /// `secret-extended-key-<network tag>` with the SWARM HRP root as the tag.
@@ -51,14 +52,14 @@ pub const HRP_SAPLING_EXTENDED_SPENDING_KEY: &str =
 
 /// The HRP for a Bech32-encoded SWARM production Sapling `ExtendedFullViewingKey`.
 ///
-/// PROVISIONAL, for the same reason as [`HRP_SAPLING_EXTENDED_SPENDING_KEY`]. This
+/// Derived from the owner-confirmed HRP root, like [`HRP_SAPLING_EXTENDED_SPENDING_KEY`]. This
 /// follows the upstream non-mainnet shape `zxview<network tag>sapling`.
 pub const HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY: &str =
     concat!("zxview", swarm_mainnet_hrp_root!(), "sapling");
 
 /// The HRP for a Bech32-encoded SWARM production Sapling `PaymentAddress`.
 ///
-/// PROVISIONAL, for the same reason as [`HRP_SAPLING_EXTENDED_SPENDING_KEY`]. This
+/// Derived from the owner-confirmed HRP root, like [`HRP_SAPLING_EXTENDED_SPENDING_KEY`]. This
 /// follows the upstream non-mainnet shape `z<network tag>sapling`, giving a string
 /// that cannot be confused with Zcash `zs…`, `ztestsapling…` or `zregtestsapling…`.
 pub const HRP_SAPLING_PAYMENT_ADDRESS: &str = concat!("z", swarm_mainnet_hrp_root!(), "sapling");

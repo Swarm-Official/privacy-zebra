@@ -495,18 +495,18 @@ mod tests {
         );
     }
 
-    /// Golden: the Sapling and TEX encodings derived from the PROVISIONAL HRP root.
+    /// Golden: the Sapling and TEX encodings derived from the owner-confirmed HRP root `swm`.
     #[test]
     fn swarm_main_sapling_and_tex() {
         encoding(
-            "zsvmsapling1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq32jyug",
+            "zswmsapling1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqz07x33",
             ZcashAddress {
                 net: NetworkType::SwarmMain,
                 kind: AddressKind::Sapling([0; 43]),
             },
         );
         encoding(
-            "texsvm1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0e5x6p",
+            "texswm1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpfw3pr",
             ZcashAddress {
                 net: NetworkType::SwarmMain,
                 kind: AddressKind::Tex([0; 20]),
@@ -529,7 +529,7 @@ mod tests {
 
         let encoded = addr.to_string();
         assert!(
-            encoded.starts_with("svm1"),
+            encoded.starts_with("swm1"),
             "unexpected SWARM production unified prefix: {encoded}",
         );
         assert_eq!(encoded.parse(), Ok(addr));
@@ -611,7 +611,7 @@ mod tests {
     /// Negative: SWARM production encodings are refused for `Test`, `Regtest` and `Main`.
     #[test]
     fn swarm_main_encodings_are_rejected_for_other_networks() {
-        let unified_svm = ZcashAddress {
+        let unified_swm = ZcashAddress {
             net: NetworkType::SwarmMain,
             kind: AddressKind::Unified(unified::Address(vec![
                 unified::address::Receiver::Sapling([0; 43]),
@@ -622,9 +622,9 @@ mod tests {
         for encoded in [
             "s1MCkDhVejM4RqDyRR1rEJkudd26FVWipPD",
             "s3Mtm9Ez6HFNovPfrY7WpjPGZmYNxztrxbb",
-            "zsvmsapling1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq32jyug",
-            "texsvm1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0e5x6p",
-            unified_svm.as_str(),
+            "zswmsapling1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqz07x33",
+            "texswm1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpfw3pr",
+            unified_swm.as_str(),
         ] {
             for net in [NetworkType::Main, NetworkType::Test, NetworkType::Regtest] {
                 rejected_for(encoded, net);
@@ -632,7 +632,7 @@ mod tests {
         }
 
         // The SWARM production unified HRPs never resolve to another network.
-        for hrp in ["svm", "uviewsvm", "uivksvm"] {
+        for hrp in ["swm", "uviewswm", "uivkswm"] {
             for resolved in [
                 <unified::Address as SealedContainer>::hrp_network(hrp),
                 <unified::Ufvk as SealedContainer>::hrp_network(hrp),

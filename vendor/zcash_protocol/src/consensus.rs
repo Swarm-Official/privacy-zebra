@@ -1123,27 +1123,27 @@ mod tests {
 
     /// Golden values for the SWARM production network type.
     ///
-    /// The HRP root is PROVISIONAL (`svm` vs `swm`); if the owner flips it, the single
-    /// literal in `constants::swarm_mainnet` changes and this test is the place that
-    /// records the new expected strings.
+    /// The HRP root is `swm`, owner-confirmed on 2026-09-25. It is derived from a single
+    /// literal in `constants::swarm_mainnet`, and this test is where the strings that
+    /// literal produces are recorded.
     #[test]
     fn swarm_main_network_constants() {
         let net = NetworkType::SwarmMain;
         assert_eq!(net.coin_type(), 9767);
         assert_eq!(net.b58_pubkey_address_prefix(), [0x1c, 0x28]);
         assert_eq!(net.b58_script_address_prefix(), [0x1c, 0x2d]);
-        assert_eq!(net.hrp_unified_address(), "svm");
-        assert_eq!(net.hrp_unified_fvk(), "uviewsvm");
-        assert_eq!(net.hrp_unified_ivk(), "uivksvm");
-        assert_eq!(net.hrp_tex_address(), "texsvm");
-        assert_eq!(net.hrp_sapling_payment_address(), "zsvmsapling");
+        assert_eq!(net.hrp_unified_address(), "swm");
+        assert_eq!(net.hrp_unified_fvk(), "uviewswm");
+        assert_eq!(net.hrp_unified_ivk(), "uivkswm");
+        assert_eq!(net.hrp_tex_address(), "texswm");
+        assert_eq!(net.hrp_sapling_payment_address(), "zswmsapling");
         assert_eq!(
             net.hrp_sapling_extended_spending_key(),
-            "secret-extended-key-svm"
+            "secret-extended-key-swm"
         );
         assert_eq!(
             net.hrp_sapling_extended_full_viewing_key(),
-            "zxviewsvmsapling"
+            "zxviewswmsapling"
         );
     }
 
