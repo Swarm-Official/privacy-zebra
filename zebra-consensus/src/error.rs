@@ -125,6 +125,15 @@ pub enum TransactionError {
     #[error("transaction version {0} not supported by the network upgrade {1:?}")]
     UnsupportedByNetworkUpgrade(u32, zebra_chain::parameters::NetworkUpgrade),
 
+    #[error("transaction version {version} is not accepted on {network}")]
+    #[cfg_attr(any(test, feature = "proptest-impl"), proptest(skip))]
+    UnsupportedTransactionVersion {
+        /// The transaction's version number.
+        version: u32,
+        /// The network that does not accept it.
+        network: String,
+    },
+
     #[error("must have at least one input: transparent, shielded spend, or joinsplit")]
     NoInputs,
 

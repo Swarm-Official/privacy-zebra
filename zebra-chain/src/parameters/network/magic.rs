@@ -24,6 +24,7 @@ impl Network {
         match self {
             Network::Mainnet => magics::MAINNET,
             Network::Testnet(params) => params.network_magic(),
+            Network::SwarmMain(params) => params.network_magic(),
         }
     }
 }

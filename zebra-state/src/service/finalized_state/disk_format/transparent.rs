@@ -621,6 +621,15 @@ fn address_variant(address: &transparent::Address) -> u8 {
         // TEX address variants
         (Mainnet, Tex { .. }) => 4,
         (Testnet | Regtest, Tex { .. }) => 5,
+        // The SWARM production variants are appended after the existing ones, so every byte
+        // already written to a state database keeps its meaning. SWARM has its own transparent
+        // prefixes, so unlike Regtest it does not share another network's encoding.
+        (SwarmMainnet, PayToPublicKeyHash { .. }) => 6,
+        (SwarmMainnet, PayToScriptHash { .. }) => 7,
+        // Unreachable in practice: a TEX address is only ever built by decoding a ZIP-320
+        // string, and both decoders refuse SwarmMain because it has no reviewed ZIP-320 prefix
+        // assignment. It is given a value rather than a panic so that this function stays total.
+        (SwarmMainnet, Tex { .. }) => 8,
     }
 }
 
@@ -643,10 +652,12 @@ impl FromDisk for transparent::Address {
         let address_variant = address_variant[0];
         let hash_bytes = hash_bytes.try_into().unwrap();
 
-        let network = if address_variant < 2 {
-            NetworkKind::Mainnet
-        } else {
-            NetworkKind::Testnet
+        // Variants 0 to 5 keep exactly the mapping they had before the SWARM production
+        // variants were appended.
+        let network = match address_variant {
+            0 | 1 => NetworkKind::Mainnet,
+            6 | 7 | 8 => NetworkKind::SwarmMainnet,
+            _ => NetworkKind::Testnet,
         };
 
         if address_variant % 2 == 0 {

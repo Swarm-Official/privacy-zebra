@@ -61,6 +61,9 @@ impl Network {
                 .expect("hard-coded hash parses"),
             // See `zebra_chain::parameters::network::testnet` for more details.
             Network::Testnet(params) => params.genesis_hash(),
+            // Supplied by configuration and validated by `SwarmMainParametersBuilder::finish`;
+            // there is no hard-coded SWARM production genesis to fall back to.
+            Network::SwarmMain(params) => params.genesis_hash(),
         }
     }
     /// Returns the hard-coded checkpoint list for `network`.
@@ -68,6 +71,13 @@ impl Network {
         match self {
             Network::Mainnet => MAINNET_CHECKPOINT_LIST.clone(),
             Network::Testnet(params) => params.checkpoints(),
+            // SWARM production has no checkpoints: it has no history to checkpoint, and copying
+            // an upstream list would pin a SWARM node to Zcash block hashes it will never see.
+            // The genesis checkpoint is the whole list, exactly as on a fresh custom Testnet.
+            Network::SwarmMain(params) => Arc::new(
+                CheckpointList::from_list([(block::Height(0), params.genesis_hash())])
+                    .expect("a single genesis checkpoint is a valid checkpoint list"),
+            ),
         }
     }
 }

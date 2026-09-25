@@ -4669,3 +4669,155 @@ fn script_sig_args_expected_values() {
         .expect("1-of-1 multisig should be a standard script kind");
     assert_eq!(check::script_sig_args_expected(&ms_kind), Some(2));
 }
+
+/// SwarmMain accepts only V5 and V6 transactions; the upstream networks are unchanged.
+///
+/// This is `zebra_consensus::transaction::check::transaction_version_allowed`, which both block
+/// validation and the mempool reach through `Verifier`, so one check covers both.
+#[test]
+fn swarm_main_accepts_only_v5_and_v6_transactions() {
+    use zebra_chain::parameters::{
+        subsidy::FundingStreamReceiver, swarm_main::SwarmMainParameters, SWARM_PRODUCTION_DOMAIN,
+    };
+
+    let _init_guard = zebra_test::init();
+
+    let swarm_main = Network::SwarmMain(Arc::new(
+        SwarmMainParameters::build()
+            .with_genesis_hash(
+                "0000000000000000000000000000000000000000000000000000000000000abc"
+                    .parse()
+                    .expect("the fixture genesis parses"),
+            )
+            .with_funding_stream_address(
+                FundingStreamReceiver::Ecc,
+                "s3SMKDUgQ2JoZxEArhrUw5ofKtZG5YjknAC",
+            )
+            .with_funding_stream_address(
+                FundingStreamReceiver::MajorGrants,
+                "s3X7hSqNZJJXDfq28SRQ7JvbJbF43vfGpiQ",
+            )
+            .with_funding_stream_address(
+                FundingStreamReceiver::ZcashFoundation,
+                "s3Nv3ARoQTLNkhHhbShTP9pRjhRWBXVP7n4",
+            )
+            .finish()
+            .expect("the fixture profile is complete"),
+    ));
+
+    let v1 = Transaction::V1 {
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        lock_time: LockTime::unlocked(),
+    };
+    let v2 = Transaction::V2 {
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        lock_time: LockTime::unlocked(),
+        joinsplit_data: None,
+    };
+    let v3 = Transaction::V3 {
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(1),
+        joinsplit_data: None,
+    };
+    let v4 = Transaction::V4 {
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(1),
+        joinsplit_data: None,
+        sapling_shielded_data: None,
+    };
+    let v5 = Transaction::V5 {
+        consensus_branch_id: SWARM_PRODUCTION_DOMAIN,
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(1),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+    };
+    let v6 = Transaction::V6 {
+        consensus_branch_id: SWARM_PRODUCTION_DOMAIN,
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(1),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+        ironwood_shielded_data: None,
+    };
+
+    // V1 to V4 carry no `nConsensusBranchId`, so an identical one would be valid on any chain
+    // that accepts that version. SwarmMain rejects them with an explicit, named error.
+    for tx in [&v1, &v2, &v3, &v4] {
+        let error = check::transaction_version_allowed(tx, Height(1), &swarm_main)
+            .expect_err("SwarmMain must reject pre-V5 transactions at height 1");
+        assert_eq!(
+            error,
+            TransactionError::UnsupportedTransactionVersion {
+                version: tx.version(),
+                network: "SwarmMainnet".to_string(),
+            },
+        );
+    }
+
+    // V5 and V6 commit to a domain, so they are accepted.
+    for tx in [&v5, &v6] {
+        check::transaction_version_allowed(tx, Height(1), &swarm_main)
+            .expect("SwarmMain must accept V5 and V6 transactions");
+    }
+
+    // Height 0 is exempt: the genesis coinbase is a legacy-version transaction, because the
+    // SWARM genesis is produced from an upstream block fixture whose coinbase is a V4.
+    for tx in [&v1, &v2, &v3, &v4, &v5, &v6] {
+        check::transaction_version_allowed(tx, Height(0), &swarm_main).unwrap_or_else(|error| {
+            panic!(
+                "the genesis coinbase exemption must accept a V{}: {error}",
+                tx.version()
+            )
+        });
+    }
+
+    // The real thing: the genesis block fixture the SWARM genesis tool starts from. Its coinbase
+    // is a legacy-version transaction, it is accepted at height 0, and the identical transaction
+    // is rejected at height 1.
+    let genesis_block: Block = zebra_test::vectors::BLOCK_TESTNET_GENESIS_BYTES
+        .zcash_deserialize_into()
+        .expect("the genesis fixture is a valid block");
+    let genesis_coinbase = genesis_block
+        .transactions
+        .first()
+        .expect("the genesis block has a coinbase");
+    assert!(
+        genesis_coinbase.version() < 5,
+        "this test is only meaningful while the genesis coinbase is a legacy version, got V{}",
+        genesis_coinbase.version()
+    );
+    check::transaction_version_allowed(genesis_coinbase, Height(0), &swarm_main)
+        .expect("the genesis block must still validate on SwarmMain");
+    assert_eq!(
+        check::transaction_version_allowed(genesis_coinbase, Height(1), &swarm_main),
+        Err(TransactionError::UnsupportedTransactionVersion {
+            version: genesis_coinbase.version(),
+            network: "SwarmMainnet".to_string(),
+        }),
+        "the same legacy transaction must be rejected at height 1"
+    );
+
+    // The upstream networks are unchanged: every version, including V4, still passes this check,
+    // and the version rules that do apply to them are enforced elsewhere.
+    for network in Network::iter() {
+        for tx in [&v1, &v2, &v3, &v4, &v5, &v6] {
+            check::transaction_version_allowed(tx, Height(1), &network).unwrap_or_else(|error| {
+                panic!(
+                    "{network} must keep accepting a V{} transaction at this check: {error}",
+                    tx.version()
+                )
+            });
+        }
+    }
+}

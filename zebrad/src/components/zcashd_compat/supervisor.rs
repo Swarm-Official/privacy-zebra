@@ -107,6 +107,11 @@ impl SupervisorConfig {
                 // would reject with a peer ban.
                 args.push("-regtestacceptunvalidatedpow".to_string());
             }
+            // `zcashd` has no SWARM production mode. Passing no flag would start it on Zcash
+            // Mainnet and passing `-testnet` would start it on Zcash Testnet, so either would
+            // silently run a foreign chain beside a SWARM node. This flag is one `zcashd` does
+            // not recognise, so it refuses to start: fail closed, loudly.
+            NetworkKind::SwarmMainnet => args.push("-swarmmainnet".to_string()),
         }
 
         // Always include -printtoconsole and filter it out from extra_args

@@ -253,6 +253,11 @@ impl ParameterSubsidy for Network {
                     height_for_halving(1, self).expect("first halving height should be available")
                 }
             }
+            // SWARM has no Blossom-era history: every upgrade activates at height 1, so the
+            // generic computation from the post-Blossom halving interval is the whole answer.
+            Network::SwarmMain(_) => {
+                height_for_halving(1, self).expect("first halving height should be available")
+            }
         }
     }
 
@@ -260,6 +265,7 @@ impl ParameterSubsidy for Network {
         match self {
             Network::Mainnet => POST_BLOSSOM_HALVING_INTERVAL,
             Network::Testnet(params) => params.post_blossom_halving_interval(),
+            Network::SwarmMain(params) => params.post_blossom_halving_interval(),
         }
     }
 
@@ -267,6 +273,7 @@ impl ParameterSubsidy for Network {
         match self {
             Network::Mainnet => PRE_BLOSSOM_HALVING_INTERVAL,
             Network::Testnet(params) => params.pre_blossom_halving_interval(),
+            Network::SwarmMain(params) => params.pre_blossom_halving_interval(),
         }
     }
 

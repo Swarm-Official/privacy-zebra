@@ -194,3 +194,161 @@ fn should_allow_unshielded_coinbase_spends_rejected_on_testnet() {
         "unexpected error: {err}"
     );
 }
+
+/// A complete `[network]` section selecting the SWARM production network.
+const SWARM_MAIN_CONFIG: &str = "\
+network = 'SwarmMainnet'
+
+[swarm_main]
+genesis_hash = '0000000000000000000000000000000000000000000000000000000000000abc'
+[swarm_main.funding_stream_addresses]
+core_development = 's3SMKDUgQ2JoZxEArhrUw5ofKtZG5YjknAC'
+grants_ecosystem = 's3X7hSqNZJJXDfq28SRQ7JvbJbF43vfGpiQ'
+community_reserve = 's3Nv3ARoQTLNkhHhbShTP9pRjhRWBXVP7n4'
+";
+
+/// A complete SwarmMain configuration deserializes into the validated profile, and the listen
+/// address defaults to the SWARM production P2P port.
+#[test]
+fn parse_complete_swarm_main_config() {
+    let _init_guard = zebra_test::init();
+
+    let config: Config = toml::from_str(SWARM_MAIN_CONFIG).expect("a complete config parses");
+
+    assert!(config.network.is_swarm_main());
+    assert!(!config.network.is_a_test_network());
+    assert_eq!(config.network.to_string(), "SwarmMainnet");
+    assert_eq!(config.listen_addr.port(), 28233);
+
+    let params = config
+        .network
+        .swarm_main_parameters()
+        .expect("the configured network is SwarmMain");
+    assert_eq!(params.rpc_port(), 28232);
+    assert_eq!(
+        params.genesis_hash().to_string(),
+        "0000000000000000000000000000000000000000000000000000000000000abc"
+    );
+
+    // No upstream seed peers are used: the upstream lists name Zcash DNS seeders.
+    assert!(config.initial_peer_hostnames().is_empty());
+}
+
+/// A SwarmMain configuration missing any required field fails to parse, with a message naming
+/// what to fix. This happens during deserialization, so it happens before any listener is bound
+/// or any database is opened.
+#[test]
+fn swarm_main_config_rejects_incomplete_definitions() {
+    let _init_guard = zebra_test::init();
+
+    // No `[swarm_main]` section at all.
+    let error = toml::from_str::<Config>("network = 'SwarmMainnet'\n")
+        .expect_err("a bare SwarmMainnet name must not parse");
+    assert!(
+        error.to_string().contains("[network.swarm_main]"),
+        "the error must name the missing section, got: {error}"
+    );
+
+    // A section with no genesis hash.
+    let no_genesis = SWARM_MAIN_CONFIG.replace(
+        "genesis_hash = '0000000000000000000000000000000000000000000000000000000000000abc'\n",
+        "",
+    );
+    let error =
+        toml::from_str::<Config>(&no_genesis).expect_err("a missing genesis hash must not parse");
+    assert!(
+        error
+            .to_string()
+            .contains("genesis block hash is unresolved"),
+        "the error must name the unresolved genesis, got: {error}"
+    );
+
+    // A section with a missing funding stream destination.
+    let no_reserve = SWARM_MAIN_CONFIG.replace(
+        "community_reserve = 's3Nv3ARoQTLNkhHhbShTP9pRjhRWBXVP7n4'\n",
+        "",
+    );
+    let error = toml::from_str::<Config>(&no_reserve)
+        .expect_err("a missing funding stream destination must not parse");
+    assert!(
+        error.to_string().contains("community_reserve"),
+        "the error must name the missing destination key, got: {error}"
+    );
+
+    // A funding stream destination on another network.
+    let testnet_recipient = SWARM_MAIN_CONFIG.replace(
+        "s3SMKDUgQ2JoZxEArhrUw5ofKtZG5YjknAC",
+        "t2DGVURG5tAyXXSkj85JV5xbvTobYv7H99n",
+    );
+    let error = toml::from_str::<Config>(&testnet_recipient)
+        .expect_err("a testnet funding stream destination must not parse");
+    assert!(
+        error.to_string().contains("not a SwarmMain address"),
+        "the error must say the address is on another network, got: {error}"
+    );
+
+    // Another network's genesis.
+    let testnet_genesis = SWARM_MAIN_CONFIG.replace(
+        "0000000000000000000000000000000000000000000000000000000000000abc",
+        "045993f5c91ea160c7ebda573dd97b0016816bca68d395bfff202779b88e2a28",
+    );
+    let error = toml::from_str::<Config>(&testnet_genesis)
+        .expect_err("the SWARM testnet genesis must not parse as SwarmMain's");
+    assert!(
+        error.to_string().contains("genesis of another network"),
+        "the error must say the genesis belongs to another network, got: {error}"
+    );
+}
+
+/// A `[swarm_main]` section on any other network is refused, so SWARM production values cannot
+/// sit in the configuration of a node that is quietly running somewhere else.
+#[test]
+fn swarm_main_parameters_are_rejected_on_other_networks() {
+    let _init_guard = zebra_test::init();
+
+    let mismatched = SWARM_MAIN_CONFIG.replace("network = 'SwarmMainnet'", "network = 'Testnet'");
+    let error = toml::from_str::<Config>(&mismatched)
+        .expect_err("swarm_main parameters on Testnet must not parse");
+    assert!(
+        error
+            .to_string()
+            .contains("only valid when `network` is `SwarmMainnet`"),
+        "the error must say the section is on the wrong network, got: {error}"
+    );
+}
+
+/// The existing network configurations are unaffected by the new section.
+#[test]
+fn upstream_configs_are_unaffected_by_swarm_main() {
+    let _init_guard = zebra_test::init();
+
+    for (source, expected_port, is_test) in [
+        ("", 8233, false),
+        ("network = 'Mainnet'\n", 8233, false),
+        ("network = 'Testnet'\n", 18233, true),
+    ] {
+        let config: Config = toml::from_str(source).expect("an upstream config parses");
+        assert_eq!(config.listen_addr.port(), expected_port);
+        assert_eq!(config.network.is_a_test_network(), is_test);
+        assert!(!config.network.is_swarm_main());
+        assert!(!config.initial_peer_hostnames().is_empty());
+    }
+}
+
+/// A configured SwarmMain profile survives a serialization round trip with its required fields
+/// intact: serializing it as the bare name would silently drop the genesis hash and the funding
+/// stream destinations.
+#[test]
+fn swarm_main_config_serialization_roundtrip() {
+    let _init_guard = zebra_test::init();
+
+    let config: Config = toml::from_str(SWARM_MAIN_CONFIG).expect("a complete config parses");
+    let serialized = toml::to_string(&config).expect("the config serializes");
+    assert!(
+        serialized.contains("s3SMKDUgQ2JoZxEArhrUw5ofKtZG5YjknAC"),
+        "the serialized config must keep the funding stream destinations:\n{serialized}"
+    );
+
+    let deserialized: Config = toml::from_str(&serialized).expect("the round trip parses");
+    assert_eq!(config.network, deserialized.network);
+}

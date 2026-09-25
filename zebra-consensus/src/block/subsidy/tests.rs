@@ -119,6 +119,11 @@ fn test_funding_stream_addresses() -> Result<(), Report> {
                     NetworkKind::Mainnet => NetworkKind::Mainnet,
                     // `Regtest` uses `Testnet` transparent addresses.
                     NetworkKind::Testnet | NetworkKind::Regtest => NetworkKind::Testnet,
+                    // Unlike `Regtest`, SwarmMain has its own transparent prefixes and never
+                    // borrows another network's. `Network::iter()` does not yield it, because it
+                    // has no default; its funding stream addresses are checked by
+                    // `swarm_main::tests::builder_accepts_a_complete_definition`.
+                    NetworkKind::SwarmMainnet => NetworkKind::SwarmMainnet,
                 };
 
                 assert_eq!(

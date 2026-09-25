@@ -310,6 +310,11 @@ fn invalidate_block_removes_block_and_descendants_from_chain_for_network(
                 .any(|block| block.height == block::Height(584001)),
             "invalidated descendants should contain block3"
         ),
+        // This test replays recorded Zcash block vectors, which exist only for the upstream
+        // networks. SwarmMain has no such vectors and is never passed in here.
+        Network::SwarmMain(_) => {
+            unreachable!("this test is only parameterised over the upstream networks")
+        }
     }
 
     Ok(())

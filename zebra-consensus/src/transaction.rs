@@ -797,6 +797,10 @@ fn check_structure_and_network_rules(
     // once and share it rather than recomputing it per check.
     let network_upgrade = NetworkUpgrade::current(network, height);
 
+    // Which transaction versions this network accepts at all. This is checked before the
+    // version-specific rules below, so a version the network does not accept is reported as
+    // such rather than as a failure of a rule that does not apply to it.
+    check::transaction_version_allowed(tx, height, network)?;
     check::has_inputs_and_outputs(tx)?;
     check::has_enough_orchard_flags(tx)?;
     // NU6.3 / Ironwood flag rules (no-ops for pre-v6 transactions).

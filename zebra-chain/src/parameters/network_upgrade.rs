@@ -292,6 +292,9 @@ impl Network {
         match self {
             Mainnet => MAINNET_ACTIVATION_HEIGHTS.iter().cloned().collect(),
             Testnet(params) => params.activation_heights().clone(),
+            // Every upgrade activates at height 1, so the NU6.3 rules and the SWARM transaction
+            // domain are in force from the first block that can contain a transaction.
+            SwarmMain(_) => super::network::swarm_main::activation_list(),
         }
     }
 
@@ -468,6 +471,11 @@ impl NetworkUpgrade {
                 let network_upgrade = NetworkUpgrade::current(network, height);
                 Some(network_upgrade.target_spacing() * TESTNET_MINIMUM_DIFFICULTY_GAP_MULTIPLIER)
             }
+            // The testnet minimum-difficulty exception is OFF on SWARM production, as decided in
+            // the identity proposal. It exists so a testnet with no miners can still make
+            // progress; on a production chain it is an attack surface, because it lets an
+            // attacker who can stall block production mine a long low-difficulty branch.
+            (Network::SwarmMain(_), _) => None,
         }
     }
 
@@ -560,7 +568,20 @@ impl ConsensusBranchId {
     /// Returns the current consensus branch id for `network` and `height`.
     ///
     /// Returns None if the network has no branch id at this height.
+    ///
+    /// # Correctness
+    ///
+    /// The domain is resolved through `network`'s own [`crate::parameters::DomainRegistry`], not
+    /// through the global `NetworkUpgrade::branch_id` table. For the upstream networks that
+    /// registry is the closed upstream table, so this returns exactly what
+    /// `NetworkUpgrade::current(network, height).branch_id()` returned before, value for value.
+    /// For `Network::SwarmMain` it returns the SWARM production domain `0x53574d31`, and it can
+    /// never return an upstream domain there: `DomainRegistry::SWARM_PRODUCTION` does not admit
+    /// one.
     pub fn current(network: &Network, height: block::Height) -> Option<ConsensusBranchId> {
-        NetworkUpgrade::current(network, height).branch_id()
+        network
+            .domain_registry()
+            .context_at(network, height)
+            .map(|ctx| ctx.branch())
     }
 }

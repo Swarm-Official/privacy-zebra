@@ -16,6 +16,8 @@ use tracing::Span;
 use zebra_chain::{
     common::atomic_write,
     parameters::{
+        subsidy::FundingStreamReceiver,
+        swarm_main::{SwarmMainParameters, SwarmMainParametersBuilder},
         testnet::{
             self, ConfiguredActivationHeights, ConfiguredCheckpoints, ConfiguredFundingStreams,
             ConfiguredLockboxDisbursement, RegtestParameters,
@@ -245,6 +247,13 @@ impl Config {
         match &self.network {
             Network::Mainnet => self.initial_mainnet_peers.clone(),
             Network::Testnet(_params) => self.initial_testnet_peers.clone(),
+            // SWARM production has no built-in seed list, and deliberately does not fall back to
+            // either upstream list: `initial_mainnet_peers` and `initial_testnet_peers` name
+            // Zcash DNS seeders, which would point a SWARM node at Zcash nodes. They would be
+            // rejected at the version handshake because the network magic differs, but a node
+            // that dials only foreign peers never finds its own network at all. SWARM peers come
+            // from `initial_peers` in the configuration, and from the on-disk peer cache.
+            Network::SwarmMain(_) => IndexSet::new(),
         }
     }
 
@@ -618,6 +627,133 @@ struct DTestnetParameters {
     should_allow_unshielded_coinbase_spends: Option<bool>,
 }
 
+/// The SWARM production funding stream destinations, as they appear in the configuration.
+///
+/// Only the destinations are configurable. The numerators, the height range and the mapping from
+/// these keys to the consensus funding stream slots are part of the network definition and live
+/// in `zebra_chain::parameters::swarm_main`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DSwarmMainFundingStreamAddresses {
+    /// The Core Development destination, a SwarmMain P2SH address.
+    core_development: Option<String>,
+    /// The Grants & Ecosystem destination, a SwarmMain P2SH address.
+    grants_ecosystem: Option<String>,
+    /// The Community & Development Reserve destination, a SwarmMain P2SH address.
+    community_reserve: Option<String>,
+}
+
+/// The SWARM production network parameters, as they appear in the configuration.
+///
+/// These are the fields that have no reviewed value until the launch ceremony. Everything else
+/// about SwarmMain is fixed by the network definition and is deliberately not configurable: a
+/// node that could be told a different magic, a different difficulty limit or a different
+/// activation schedule would not be on the same network as the other nodes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DSwarmMainParameters {
+    /// The genesis block hash. Required; there is no default.
+    genesis_hash: Option<String>,
+    /// The funding stream destinations. All three are required.
+    #[serde(default)]
+    funding_stream_addresses: DSwarmMainFundingStreamAddresses,
+    /// The P2P listener port. Defaults to 28233.
+    p2p_port: Option<u16>,
+    /// The JSON-RPC port. Defaults to 28232.
+    rpc_port: Option<u16>,
+}
+
+impl From<&SwarmMainParameters> for DSwarmMainParameters {
+    fn from(params: &SwarmMainParameters) -> Self {
+        let address_for = |receiver| {
+            params
+                .funding_streams()
+                .recipients()
+                .get(&receiver)
+                .and_then(|recipient| recipient.addresses().first())
+                .map(ToString::to_string)
+        };
+
+        Self {
+            genesis_hash: Some(params.genesis_hash().to_string()),
+            funding_stream_addresses: DSwarmMainFundingStreamAddresses {
+                core_development: address_for(FundingStreamReceiver::Ecc),
+                grants_ecosystem: address_for(FundingStreamReceiver::MajorGrants),
+                community_reserve: address_for(FundingStreamReceiver::ZcashFoundation),
+            },
+            p2p_port: Some(params.p2p_port()),
+            rpc_port: Some(params.rpc_port()),
+        }
+    }
+}
+
+/// Builds the validated SWARM production profile from its configuration section.
+///
+/// # Correctness
+///
+/// This runs during configuration deserialization, which is before any listener is bound and
+/// before the state database is opened. A configuration that names SwarmMain but leaves out a
+/// required field therefore fails the node's startup outright, rather than starting a node with
+/// a half-defined production network.
+fn build_swarm_main<'de, D: Deserializer<'de>>(
+    params: Option<DSwarmMainParameters>,
+) -> Result<Network, D::Error> {
+    let params = params.ok_or_else(|| {
+        de::Error::custom(
+            "the `SwarmMainnet` network requires a `[network.swarm_main]` section with the              genesis block hash and the three funding stream destinations; there is no default              SwarmMain definition, because using another network's values would put this node              on another network",
+        )
+    })?;
+
+    let DSwarmMainParameters {
+        genesis_hash,
+        funding_stream_addresses,
+        p2p_port,
+        rpc_port,
+    } = params;
+
+    let mut builder = SwarmMainParametersBuilder::default();
+
+    if let Some(genesis_hash) = genesis_hash {
+        builder = builder.with_genesis_hash(genesis_hash.parse().map_err(|error| {
+            de::Error::custom(format!(
+                "network.swarm_main.genesis_hash is not a block hash: {error}"
+            ))
+        })?);
+    }
+
+    for (receiver, address) in [
+        (
+            FundingStreamReceiver::Ecc,
+            funding_stream_addresses.core_development,
+        ),
+        (
+            FundingStreamReceiver::MajorGrants,
+            funding_stream_addresses.grants_ecosystem,
+        ),
+        (
+            FundingStreamReceiver::ZcashFoundation,
+            funding_stream_addresses.community_reserve,
+        ),
+    ] {
+        if let Some(address) = address {
+            builder = builder.with_funding_stream_address(receiver, address);
+        }
+    }
+
+    if let Some(port) = p2p_port {
+        builder = builder.with_p2p_port(port);
+    }
+    if let Some(port) = rpc_port {
+        builder = builder.with_rpc_port(port);
+    }
+
+    // Every missing or invalid field is a named error from the profile builder, so the operator
+    // is told exactly which one to fix.
+    let params = builder.finish().map_err(de::Error::custom)?;
+
+    Ok(Network::SwarmMain(std::sync::Arc::new(params)))
+}
+
 /// Network configuration used during deserialization.
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
@@ -656,6 +792,15 @@ struct DConfig {
     #[serde(alias = "new_peer_interval", with = "humantime_serde")]
     crawl_new_peer_interval: Duration,
     max_connections_per_ip: Option<usize>,
+
+    /// The SWARM production parameters. Required when `network` is `SwarmMainnet`, and rejected
+    /// otherwise, so that a configuration cannot carry SWARM production values while quietly
+    /// running on another network.
+    ///
+    /// Declared last because TOML requires every scalar value to be emitted before any table, so
+    /// an optional table must not sit ahead of the remaining scalar fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    swarm_main: Option<DSwarmMainParameters>,
 }
 
 impl Default for DConfig {
@@ -672,6 +817,7 @@ impl Default for DConfig {
             peerset_initial_target_size: config.peerset_initial_target_size,
             crawl_new_peer_interval: config.crawl_new_peer_interval,
             max_connections_per_ip: Some(config.max_connections_per_ip),
+            swarm_main: None,
         }
     }
 }
@@ -750,8 +896,19 @@ impl From<Config> for DConfig {
                 None => DNetwork::DefaultForKind(NetworkKind::Regtest),
             },
 
+            // Serialized by name, with its configured fields carried in the `swarm_main`
+            // section below. Falling into `other_kind` here would round-trip a configured
+            // SwarmMain profile as the bare name `SwarmMainnet` and silently drop the genesis
+            // hash and the funding stream destinations, which is the one thing a SwarmMain
+            // configuration must never lose.
+            NetworkKind::SwarmMainnet => DNetwork::DefaultForKind(NetworkKind::SwarmMainnet),
+
             other_kind => DNetwork::DefaultForKind(other_kind),
         };
+
+        let swarm_main = network
+            .swarm_main_parameters()
+            .map(|params| params.as_ref().into());
 
         DConfig {
             listen_addr: listen_addr.to_string(),
@@ -764,6 +921,7 @@ impl From<Config> for DConfig {
             peerset_initial_target_size,
             crawl_new_peer_interval,
             max_connections_per_ip: Some(max_connections_per_ip),
+            swarm_main,
         }
     }
 }
@@ -784,9 +942,28 @@ impl<'de> Deserialize<'de> for Config {
             peerset_initial_target_size,
             crawl_new_peer_interval,
             max_connections_per_ip,
+            swarm_main,
         } = DConfig::deserialize(deserializer)?;
 
+        // A `[network.swarm_main]` section on any other network is a configuration the operator
+        // did not mean to write: most likely they edited the parameters and forgot to change the
+        // network name, which would start a node on the wrong chain with SWARM destinations in
+        // its config file.
+        if swarm_main.is_some()
+            && !matches!(
+                dnetwork,
+                DNetwork::DefaultForKind(NetworkKind::SwarmMainnet)
+            )
+        {
+            return Err(de::Error::custom(
+                "a `[network.swarm_main]` section is only valid when `network` is `SwarmMainnet`",
+            ));
+        }
+
         let network = match (dnetwork, testnet_parameters) {
+            (DNetwork::DefaultForKind(NetworkKind::SwarmMainnet), _) => {
+                build_swarm_main::<D>(swarm_main)?
+            }
             (DNetwork::ConfiguredTestnet(params), _) => {
                 build_configured_testnet::<D>(*params, &initial_testnet_peers)?
             }

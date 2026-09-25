@@ -14,7 +14,7 @@ pub use zcash_history::{V1, V2, V3};
 use crate::{
     block::{Block, ChainHistoryMmrRootHash},
     orchard,
-    parameters::{ConsensusContext, DomainRegistry, Network, NetworkUpgrade},
+    parameters::{ConsensusContext, Network, NetworkUpgrade},
     sapling,
 };
 
@@ -139,7 +139,8 @@ impl<V: Version> Tree<V> {
         peaks: &BTreeMap<u32, Entry>,
         extra: &BTreeMap<u32, Entry>,
     ) -> Result<Self, io::Error> {
-        let ctx = DomainRegistry::UPSTREAM
+        let ctx = network
+            .domain_registry()
             .context_for_rules(network_upgrade)
             .expect("unexpected pre-Overwinter MMR history tree");
 
@@ -284,8 +285,10 @@ impl Version for zcash_history::V1 {
             .coinbase_height()
             .expect("block must have coinbase height during contextual verification");
         // This trait method's signature is fixed by `zcash_history`, so the context is resolved
-        // here from the network and height through the production registry rather than passed in.
-        let ctx = DomainRegistry::UPSTREAM
+        // here from the network and height through that network's own registry rather than passed
+        // in. The ZIP-221 history domain and the transaction domain therefore cannot drift apart.
+        let ctx = network
+            .domain_registry()
             .context_at(network, height)
             .expect("must have branch ID for chain history network upgrades");
         let network_upgrade = ctx.rules();

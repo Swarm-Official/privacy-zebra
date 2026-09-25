@@ -235,6 +235,21 @@ impl ZcashDeserialize for Address {
                     pub_key_hash: hash_bytes,
                 })
             }
+            // The SWARM production prefixes, 0x1C2D (`s3...`) and 0x1C28 (`s1...`). They are
+            // disjoint from every arm above, so this match is still a total function from a
+            // version prefix to at most one network kind: no string decodes as two networks.
+            zcash_protocol::constants::swarm_mainnet::B58_SCRIPT_ADDRESS_PREFIX => {
+                Ok(Address::PayToScriptHash {
+                    network_kind: NetworkKind::SwarmMainnet,
+                    script_hash: hash_bytes,
+                })
+            }
+            zcash_protocol::constants::swarm_mainnet::B58_PUBKEY_ADDRESS_PREFIX => {
+                Ok(Address::PayToPublicKeyHash {
+                    network_kind: NetworkKind::SwarmMainnet,
+                    pub_key_hash: hash_bytes,
+                })
+            }
             _ => Err(SerializationError::Parse("bad t-addr version/type")),
         }
     }

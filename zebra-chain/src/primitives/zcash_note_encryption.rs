@@ -3,18 +3,18 @@
 
 use crate::{
     block::Height,
-    parameters::{ConsensusContext, DomainRegistry, Network, NetworkUpgrade},
+    parameters::{ConsensusContext, Network, NetworkUpgrade},
     transaction::Transaction,
 };
 
 /// Returns true if all Sapling, Orchard, or Ironwood outputs, if any, decrypt successfully
 /// with an all-zeroes outgoing viewing key.
 ///
-/// The context is resolved from the production [`DomainRegistry::UPSTREAM`] table for `network`
-/// and `height`. Returns false when that height has no consensus branch ID, which is the same
-/// result the conversion returned before.
+/// The context is resolved from `network`'s own domain registry at `height`. Returns false when
+/// that height has no consensus branch ID, which is the same result the conversion returned
+/// before.
 pub fn decrypts_successfully(tx: &Transaction, network: &Network, height: Height) -> bool {
-    let Some(ctx) = DomainRegistry::UPSTREAM.context_at(network, height) else {
+    let Some(ctx) = network.domain_registry().context_at(network, height) else {
         return false;
     };
 

@@ -1260,10 +1260,12 @@ impl Network {
     /// Returns true if this network should allow transactions with transparent outputs
     /// that spend coinbase outputs.
     pub fn should_allow_unshielded_coinbase_spends(&self) -> bool {
-        if let Self::Testnet(params) = self {
-            params.should_allow_unshielded_coinbase_spends()
-        } else {
-            false
+        match self {
+            Self::Testnet(params) => params.should_allow_unshielded_coinbase_spends(),
+            // SWARM production keeps the shielded-coinbase rule. The SWARM testnet relaxes it for
+            // its own convenience; production must not inherit that relaxation.
+            Self::SwarmMain(params) => params.should_allow_unshielded_coinbase_spends(),
+            Self::Mainnet => false,
         }
     }
 
@@ -1272,6 +1274,11 @@ impl Network {
         match self {
             Network::Mainnet => &mainnet::FOUNDER_ADDRESS_LIST,
             Network::Testnet(_) => &testnet::FOUNDER_ADDRESS_LIST,
+            // Founders' rewards are a pre-Canopy Zcash mechanism. SWARM activates every upgrade
+            // at height 1, so no block is ever subject to the founders' reward rule and the list
+            // is empty. Returning an upstream list would name Zcash addresses as valid SWARM
+            // coinbase outputs.
+            Network::SwarmMain(_) => &[],
         }
     }
 }

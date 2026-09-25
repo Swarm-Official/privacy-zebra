@@ -9,13 +9,12 @@ use crate::{parameters::NetworkKind, transparent, BoxError};
 
 /// A [`NetworkType`] that `zebra_chain` has no [`NetworkKind`] for.
 ///
-/// Today this is only [`NetworkType::SwarmMain`]: the SWARM production network type
-/// exists in the shared protocol crates (so its address encodings can be defined and
-/// tested) but the node has no production network profile yet. Converting it silently
-/// into `Mainnet` or `Testnet` would be exactly the cross-network confusion this
-/// variant exists to prevent, so the conversion fails instead.
+/// Every [`NetworkType`] the shared protocol crates define now has a [`NetworkKind`], including
+/// [`NetworkType::SwarmMain`], which maps to [`NetworkKind::SwarmMainnet`]. This error is kept so
+/// that the conversion stays fallible: a new protocol-crate network type must be given an
+/// explicit kind here rather than falling through to `Mainnet` or `Testnet`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("network type {0:?} has no zebra network kind: production schedule admitted by P1c")]
+#[error("network type {0:?} has no zebra network kind")]
 pub struct UnsupportedNetworkType(pub NetworkType);
 
 /// Zcash address variants
@@ -141,10 +140,23 @@ impl zcash_address::TryFromAddress for Address {
         })
     }
 
+    /// # Correctness
+    ///
+    /// [`NetworkType::SwarmMain`] is refused. ZIP-320 assigns a TEX address its own two-byte
+    /// version prefix per network, and SWARM has no reviewed assignment, so a SWARM TEX address
+    /// has no encoding this node could serialize back out. Accepting one here would build an
+    /// address that cannot round-trip; see `NetworkKind::tex_address_prefix`.
     fn try_from_tex(
         network: NetworkType,
         data: [u8; 20],
     ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
+        if network == NetworkType::SwarmMain {
+            return Err(BoxError::from(
+                "TEX addresses are not defined for the SWARM production network",
+            )
+            .into());
+        }
+
         Ok(Self::Transparent(transparent::Address::from_tex(
             NetworkKind::try_from(network).map_err(BoxError::from)?,
             data,
@@ -200,10 +212,10 @@ impl TryFrom<NetworkType> for NetworkKind {
             NetworkType::Main => NetworkKind::Mainnet,
             NetworkType::Test => NetworkKind::Testnet,
             NetworkType::Regtest => NetworkKind::Regtest,
-            // Deliberately NOT mapped to Mainnet or Testnet: production schedule
-            // admitted by P1c. Until the node has a SWARM production network profile,
-            // a `SwarmMain` address has no `NetworkKind` and must be refused.
-            NetworkType::SwarmMain => return Err(UnsupportedNetworkType(network)),
+            // Deliberately its own kind, never Mainnet or Testnet: a SWARM production address
+            // that silently became a Zcash address is exactly the cross-network confusion this
+            // variant exists to prevent.
+            NetworkType::SwarmMain => NetworkKind::SwarmMainnet,
         })
     }
 }
@@ -214,6 +226,7 @@ impl From<NetworkKind> for NetworkType {
             NetworkKind::Mainnet => NetworkType::Main,
             NetworkKind::Testnet => NetworkType::Test,
             NetworkKind::Regtest => NetworkType::Regtest,
+            NetworkKind::SwarmMainnet => NetworkType::SwarmMain,
         }
     }
 }
@@ -243,25 +256,84 @@ mod tests {
         }
     }
 
-    /// The SWARM production network type has no `NetworkKind`, so a `SwarmMain` address
-    /// can never be converted into a zebra address and treated as Mainnet or Testnet.
+    /// The SWARM production network type converts to its own `NetworkKind`, and never to
+    /// Mainnet or Testnet.
     #[test]
-    fn swarm_main_has_no_network_kind() {
+    fn swarm_main_converts_to_its_own_network_kind() {
         assert_eq!(
             NetworkKind::try_from(NetworkType::SwarmMain),
-            Err(UnsupportedNetworkType(NetworkType::SwarmMain)),
+            Ok(NetworkKind::SwarmMainnet),
+        );
+        assert_eq!(
+            NetworkType::from(NetworkKind::SwarmMainnet),
+            NetworkType::SwarmMain,
         );
 
-        // The shared crate parses SWARM production encodings ...
-        for encoded in [
-            "s1MCkDhVejM4RqDyRR1rEJkudd26FVWipPD",
-            "s3Mtm9Ez6HFNovPfrY7WpjPGZmYNxztrxbb",
+        // A SWARM production address converts to a zebra address whose kind is SwarmMainnet, and
+        // re-encodes to the very same string. Both halves matter: the first says the address is
+        // usable, the second says it is not silently re-encoded under another network's prefix.
+        for (encoded, is_script_hash) in [
+            ("s1MCkDhVejM4RqDyRR1rEJkudd26FVWipPD", false),
+            ("s3Mtm9Ez6HFNovPfrY7WpjPGZmYNxztrxbb", true),
         ] {
             let parsed: ZcashAddress = encoded.parse().expect("parses in zcash_address");
-            // ... and zebra refuses to convert them into one of its own address types.
-            assert!(
-                parsed.convert::<Address>().is_err(),
-                "{encoded} must not convert to a zebra address",
+            let address = parsed.convert::<Address>().expect("converts for zebra");
+            assert_eq!(address.network(), NetworkKind::SwarmMainnet);
+            assert_ne!(address.network(), NetworkKind::Mainnet);
+            assert_ne!(address.network(), NetworkKind::Testnet);
+            assert_eq!(address.is_script_hash(), is_script_hash);
+            assert_eq!(address.payment_address().as_deref(), Some(encoded));
+        }
+    }
+
+    /// TEX addresses are refused on the SWARM production network: ZIP-320 assigns their version
+    /// prefix per network and SWARM has no reviewed assignment, so an accepted one could not be
+    /// serialized back out.
+    #[test]
+    fn swarm_main_tex_addresses_are_refused() {
+        let error = <Address as TryFromAddress>::try_from_tex(NetworkType::SwarmMain, [0u8; 20])
+            .err()
+            .expect("a SWARM TEX address must be refused");
+        assert!(
+            format!("{error:?}").contains("not defined for the SWARM production network"),
+            "the error must say TEX is undefined for SWARM, got: {error:?}"
+        );
+
+        // The upstream networks still accept them.
+        for network in [NetworkType::Main, NetworkType::Test] {
+            <Address as TryFromAddress>::try_from_tex(network, [0u8; 20])
+                .unwrap_or_else(|error| panic!("{network:?} must still accept TEX: {error:?}"));
+        }
+    }
+
+    /// A SWARM production address and a Zcash address are mutually unreadable: neither decodes
+    /// under the other's network kind. This is the transparent half of the two-way separation.
+    #[test]
+    fn swarm_main_and_upstream_transparent_addresses_are_disjoint() {
+        let swarm = [
+            "s1MCkDhVejM4RqDyRR1rEJkudd26FVWipPD",
+            "s3Mtm9Ez6HFNovPfrY7WpjPGZmYNxztrxbb",
+        ];
+        let upstream = [
+            "t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs",
+            "t3Vz22vK5z2LcKEdg16Yv4FFneEL1zg9ojd",
+            "t2DGVURG5tAyXXSkj85JV5xbvTobYv7H99n",
+        ];
+
+        for encoded in swarm {
+            let address: transparent::Address =
+                encoded.parse().expect("a SWARM address parses for zebra");
+            assert_eq!(address.network_kind(), NetworkKind::SwarmMainnet);
+        }
+
+        for encoded in upstream {
+            let address: transparent::Address = encoded
+                .parse()
+                .expect("an upstream address parses for zebra");
+            assert_ne!(
+                address.network_kind(),
+                NetworkKind::SwarmMainnet,
+                "{encoded} must not decode as a SwarmMain address",
             );
         }
     }

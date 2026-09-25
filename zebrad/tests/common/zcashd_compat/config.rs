@@ -134,6 +134,11 @@ pub fn expected_zcashd_chain_name(network: &Network) -> &'static str {
         NetworkKind::Mainnet => "main",
         NetworkKind::Testnet => "test",
         NetworkKind::Regtest => "regtest",
+        // `zcashd` has no SwarmMain mode, so it never reports a chain name for it. These tests
+        // are only parameterised over the kinds `read_test_network_kind` can return.
+        NetworkKind::SwarmMainnet => {
+            unreachable!("zcashd has no SwarmMain mode, so it reports no chain name for it")
+        }
     }
 }
 

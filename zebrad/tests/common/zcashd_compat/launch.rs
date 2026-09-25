@@ -233,6 +233,12 @@ pub async fn connect_to_external_zcashd_compat(kind: NetworkKind) -> Result<Zcas
         NetworkKind::Regtest => {
             unreachable!("regtest is handled by spawn_zebrad_with_zcashd_compat")
         }
+        // These tests run zebrad beside a real `zcashd`, and `zcashd` has no SWARM production
+        // mode at all, so there is no pairing to set up. `read_test_network_kind` never returns
+        // this kind either.
+        NetworkKind::SwarmMainnet => {
+            unreachable!("zcashd has no SwarmMain mode, so there is no compat pairing to launch")
+        }
     };
 
     Ok(ZcashdCompatSetup {

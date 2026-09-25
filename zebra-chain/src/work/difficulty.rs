@@ -730,6 +730,10 @@ impl ParameterDifficulty for Network {
             Network::Mainnet => (U256::one() << 243) - 1,
             // 2^251 - 1 for the default testnet, see `testnet::ParametersBuilder::default`()
             Network::Testnet(params) => return params.target_difficulty_limit(),
+            // The reviewed SWARM production limit, 0x07ff..ff. See
+            // `swarm_main::TARGET_DIFFICULTY_LIMIT_BYTES` for why it is the testnet bound rather
+            // than the upstream Mainnet one, and why it must not be made easier.
+            Network::SwarmMain(params) => return params.target_difficulty_limit(),
         };
 
         // `zcashd` converts the PoWLimit into a compact representation before

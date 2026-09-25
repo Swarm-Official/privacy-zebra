@@ -235,7 +235,10 @@ fn disk_thresholds(network: &Network) -> DiskThresholds {
             min_zcashd_bytes: MAINNET_MIN_ZCASHD_PROVISIONED_BYTES,
             recommended_combined_bytes: MAINNET_RECOMMENDED_COMBINED_TOTAL_BYTES,
         },
-        NetworkKind::Testnet | NetworkKind::Regtest => DiskThresholds {
+        // A SWARM production node starts at height 1 and has no Zcash-sized history to store,
+        // so the smaller thresholds are the honest ones. This is a disk-provisioning warning,
+        // not a consensus rule, and the Mainnet figures are sized for the Zcash chain's history.
+        NetworkKind::Testnet | NetworkKind::Regtest | NetworkKind::SwarmMainnet => DiskThresholds {
             min_zebra_bytes: TESTNET_MIN_ZEBRA_PROVISIONED_BYTES,
             min_zcashd_bytes: TESTNET_MIN_ZCASHD_PROVISIONED_BYTES,
             recommended_combined_bytes: TESTNET_RECOMMENDED_COMBINED_TOTAL_BYTES,

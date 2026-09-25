@@ -131,6 +131,9 @@ pub(crate) fn network_kind_label(network: &Network) -> &'static str {
         NetworkKind::Mainnet => "mainnet",
         NetworkKind::Testnet => "testnet",
         NetworkKind::Regtest => "regtest",
+        // Its own label: a SWARM production node's connection metrics must not be aggregated
+        // with a Zcash Mainnet node's in a shared dashboard.
+        NetworkKind::SwarmMainnet => "swarmmainnet",
     }
 }
 

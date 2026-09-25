@@ -14,6 +14,7 @@ use crate::{
 mod error;
 pub mod magic;
 pub mod subsidy;
+pub mod swarm_main;
 pub mod testnet;
 
 #[cfg(test)]
@@ -45,6 +46,14 @@ pub enum NetworkKind {
 
     /// Regtest mode
     Regtest,
+
+    /// The SWARM production network.
+    ///
+    /// This is a SWARM-owned production network, not upstream Zcash Mainnet and not a test
+    /// network. It is appended last on purpose: this enum's variant order is the bincode
+    /// discriminant order of `HistoryTreeParts` in the state database, so inserting a variant
+    /// anywhere else would silently reinterpret every stored history tree.
+    SwarmMainnet,
 }
 
 impl From<Network> for NetworkKind {
@@ -70,6 +79,13 @@ pub enum Network {
     /// A test network such as the default public testnet,
     /// a configured testnet, or Regtest.
     Testnet(Arc<testnet::Parameters>),
+
+    /// The SWARM production network.
+    ///
+    /// Holds a [`swarm_main::SwarmMainParameters`], which can only be built from a complete,
+    /// validated definition, so a value of this variant means the profile was complete before any
+    /// listener or database was opened. See [`swarm_main`] for what must come from configuration.
+    SwarmMain(Arc<swarm_main::SwarmMainParameters>),
 }
 
 impl NetworkKind {
@@ -80,6 +96,11 @@ impl NetworkKind {
             Self::Mainnet => zcash_protocol::constants::mainnet::B58_PUBKEY_ADDRESS_PREFIX,
             Self::Testnet | Self::Regtest => {
                 zcash_protocol::constants::testnet::B58_PUBKEY_ADDRESS_PREFIX
+            }
+            // 0x1C28, which encodes as `s1...`. Disjoint from every upstream prefix, so a SWARM
+            // production address cannot be parsed as a Zcash address or the other way round.
+            Self::SwarmMainnet => {
+                zcash_protocol::constants::swarm_mainnet::B58_PUBKEY_ADDRESS_PREFIX
             }
         }
     }
@@ -92,16 +113,24 @@ impl NetworkKind {
             Self::Testnet | Self::Regtest => {
                 zcash_protocol::constants::testnet::B58_SCRIPT_ADDRESS_PREFIX
             }
+            // 0x1C2D, which encodes as `s3...`.
+            Self::SwarmMainnet => {
+                zcash_protocol::constants::swarm_mainnet::B58_SCRIPT_ADDRESS_PREFIX
+            }
         }
     }
 
     /// Return the network name as defined in
     /// [BIP70](https://github.com/bitcoin/bips/blob/master/bip-0070.mediawiki#paymentdetailspaymentrequest)
     pub fn bip70_network_name(&self) -> String {
-        if *self == Self::Mainnet {
-            "main".to_string()
-        } else {
-            "test".to_string()
+        match self {
+            Self::Mainnet => "main".to_string(),
+            Self::Testnet | Self::Regtest => "test".to_string(),
+            // BIP70 defines only `main` and `test`, and both already name a Zcash network. SWARM
+            // production is neither, so it gets its own label rather than borrowing one: a wallet
+            // that keys on this string must not treat SWARM as Zcash Mainnet, and must not treat
+            // it as a throwaway test chain either.
+            Self::SwarmMainnet => swarm_main::CHAIN_LABEL.to_string(),
         }
     }
 
@@ -112,6 +141,18 @@ impl NetworkKind {
         match self {
             Self::Mainnet => [0x1c, 0xb8],
             Self::Testnet | Self::Regtest => [0x1d, 0x25],
+            // TEX addresses are not defined for SWARM production. ZIP-320 assigns these two
+            // bytes per network and SWARM has no reviewed assignment, so there is nothing
+            // correct to return: the upstream prefixes would encode a SWARM address that decodes
+            // as a Zcash one, and reusing SWARM's own P2PKH prefix would make a serialized TEX
+            // address indistinguishable from a serialized P2PKH address on the same network.
+            //
+            // This is therefore a reserved non-value, not a network constant. It is unreachable:
+            // `Address::Tex` is only ever constructed by decoding a ZIP-320 string, and both
+            // decoders refuse SwarmMain -- `transparent::Address`'s Bech32 arm has no SWARM HRP,
+            // and `primitives::address`'s `try_from_tex` rejects `NetworkType::SwarmMain`
+            // outright. Supporting TEX on SWARM means adding a reviewed assignment here first.
+            Self::SwarmMainnet => [0xff, 0xff],
         }
     }
 }
@@ -125,6 +166,7 @@ impl From<NetworkKind> for &'static str {
             NetworkKind::Mainnet => "MainnetKind",
             NetworkKind::Testnet => "TestnetKind",
             NetworkKind::Regtest => "RegtestKind",
+            NetworkKind::SwarmMainnet => "SwarmMainnetKind",
         }
     }
 }
@@ -140,6 +182,7 @@ impl<'a> From<&'a Network> for &'a str {
         match network {
             Network::Mainnet => "Mainnet",
             Network::Testnet(params) => params.network_name(),
+            Network::SwarmMain(params) => params.network_name(),
         }
     }
 }
@@ -165,6 +208,13 @@ impl std::fmt::Debug for Network {
                 write!(f, "{self}")
             }
             Self::Testnet(params) => f.debug_tuple("ConfiguredTestnet").field(params).finish(),
+            Self::SwarmMain(params) => f
+                .debug_struct("SwarmMain")
+                .field("genesis_hash", &params.genesis_hash())
+                .field("funding_streams", params.funding_streams())
+                .field("p2p_port", &params.p2p_port())
+                .field("rpc_port", &params.rpc_port())
+                .finish(),
         }
     }
 }
@@ -212,6 +262,7 @@ impl Network {
             Network::Mainnet => NetworkKind::Mainnet,
             Network::Testnet(params) if params.is_regtest() => NetworkKind::Regtest,
             Network::Testnet(_) => NetworkKind::Testnet,
+            Network::SwarmMain(_) => NetworkKind::SwarmMainnet,
         }
     }
 
@@ -222,10 +273,20 @@ impl Network {
         match self {
             Network::Mainnet => NetworkKind::Mainnet,
             Network::Testnet(_) => NetworkKind::Testnet,
+            // SWARM production has its own transparent prefixes, so unlike Regtest it does not
+            // share another network's t-address encoding.
+            Network::SwarmMain(_) => NetworkKind::SwarmMainnet,
         }
     }
 
     /// Returns an iterator over [`Network`] variants.
+    /// Returns an iterator over the [`Network`] variants that can be constructed without
+    /// configuration.
+    ///
+    /// [`Network::SwarmMain`] is deliberately absent: it has no default, because its genesis hash
+    /// and funding stream recipients must be supplied. Callers that iterate this to exercise
+    /// "every network" therefore keep their existing coverage unchanged, and SWARM production is
+    /// covered by its own tests instead of by a fabricated default.
     pub fn iter() -> impl Iterator<Item = Self> {
         [Self::Mainnet, Self::new_default_testnet()].into_iter()
     }
@@ -243,6 +304,10 @@ impl Network {
             Network::Mainnet => true,
             // TODO: Move `TESTNET_MAX_TIME_START_HEIGHT` to a field on testnet::Parameters (#8364)
             Network::Testnet(_params) => height >= super::TESTNET_MAX_TIME_START_HEIGHT,
+            // The max-block-time rule is in force from height 1, as decided in the identity
+            // proposal. There is no start-height exemption: SWARM has no historical blocks that
+            // predate the rule, so nothing would be excused by one.
+            Network::SwarmMain(_) => height >= swarm_main::ACTIVATION_HEIGHT,
         }
     }
 
@@ -252,6 +317,7 @@ impl Network {
             Network::Mainnet => 8233,
             // TODO: Add a `default_port` field to `testnet::Parameters` to return here. (zcashd uses 18344 for Regtest)
             Network::Testnet(_params) => 18233,
+            Network::SwarmMain(params) => params.p2p_port(),
         }
     }
 
@@ -285,8 +351,56 @@ impl Network {
     }
 
     /// Returns `true` if this network is a testing network.
+    /// Returns `true` if this network is a testing network.
+    ///
+    /// # Correctness
+    ///
+    /// [`Network::SwarmMain`] returns `false`. It is a production network with real value at
+    /// stake, and every upstream caller of this predicate uses it to relax something: the testnet
+    /// minimum-difficulty exception, the mining RPCs' `testnet` flag, the block template's
+    /// test-only allowances and zebrad's health-check exemption. Answering `true` would hand all
+    /// of those to SWARM production. This is deliberately not the same question as "is this
+    /// upstream Zcash Mainnet", which stays `*self == Network::Mainnet`.
     pub fn is_a_test_network(&self) -> bool {
-        *self != Network::Mainnet
+        matches!(self, Network::Testnet(_))
+    }
+
+    /// Returns `true` if this is the SWARM production network.
+    pub fn is_swarm_main(&self) -> bool {
+        matches!(self, Network::SwarmMain(_))
+    }
+
+    /// Returns the SWARM production parameters, if this is the SWARM production network.
+    pub fn swarm_main_parameters(&self) -> Option<&Arc<swarm_main::SwarmMainParameters>> {
+        match self {
+            Network::SwarmMain(params) => Some(params),
+            Network::Mainnet | Network::Testnet(_) => None,
+        }
+    }
+
+    /// Returns the transaction domain registry this network's transactions belong to.
+    ///
+    /// # Correctness
+    ///
+    /// This is the single place that decides which ZIP-200 domains a network admits. Upstream
+    /// networks return [`crate::parameters::DomainRegistry::UPSTREAM`], byte for byte the table
+    /// they used before this method existed. [`Network::SwarmMain`] returns
+    /// [`crate::parameters::DomainRegistry::SWARM_PRODUCTION`], which admits `0x53574d31` and no
+    /// upstream domain. The two registries are disjoint in both directions, which is the two-way
+    /// replay protection.
+    pub fn domain_registry(&self) -> &'static crate::parameters::DomainRegistry {
+        match self {
+            Network::Mainnet | Network::Testnet(_) => crate::parameters::DomainRegistry::UPSTREAM,
+            Network::SwarmMain(_) => crate::parameters::DomainRegistry::SWARM_PRODUCTION,
+        }
+    }
+
+    /// Returns the chain label used by the indexer, the wallet and the RPC `chain` field.
+    pub fn chain_label(&self) -> String {
+        match self {
+            Network::SwarmMain(params) => params.chain_label().to_string(),
+            Network::Mainnet | Network::Testnet(_) => self.bip70_network_name(),
+        }
     }
 
     /// Returns the Sapling activation height for this network.
@@ -312,6 +426,7 @@ impl Network {
                 subsidy::constants::testnet::EXPECTED_NU6_1_LOCKBOX_DISBURSEMENTS_TOTAL
             }
             Self::Testnet(params) => params.lockbox_disbursement_total_amount(),
+            Self::SwarmMain(params) => params.lockbox_disbursement_total_amount(),
         }
     }
 
@@ -330,6 +445,7 @@ impl Network {
                 subsidy::constants::testnet::NU6_1_LOCKBOX_DISBURSEMENTS.to_vec()
             }
             Self::Testnet(params) => return params.lockbox_disbursements(),
+            Self::SwarmMain(params) => return params.lockbox_disbursements(),
         };
 
         expected_lockbox_disbursements
@@ -351,6 +467,10 @@ impl Network {
             Network::Testnet(parameters) => {
                 parameters.temporary_orchard_disabling_soft_fork_height()
             }
+            // The soft fork that temporarily disabled Orchard is Zcash deployment history that
+            // SWARM does not share: SWARM starts at the NU6.3 rules, under which Orchard actions
+            // are enabled. There is no window to reproduce, so the fork is unscheduled here.
+            Network::SwarmMain(_) => None,
         }
     }
 
@@ -409,6 +529,9 @@ impl FromStr for Network {
         match string.to_lowercase().as_str() {
             "mainnet" => Ok(Network::Mainnet),
             "testnet" => Ok(Network::new_default_testnet()),
+            // `SwarmMain` is deliberately not parseable from a bare name: it has no default, so
+            // there is nothing for a name alone to select. It is selected by the `[network]`
+            // section of the configuration, which also carries its required fields.
             _ => Err(InvalidNetworkError(string.to_owned())),
         }
     }

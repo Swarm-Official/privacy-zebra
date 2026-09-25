@@ -870,6 +870,55 @@ pub fn mempool_standard_input_scripts(
 ///
 /// [ZIP-244]: <https://zips.z.cash/zip-0244>
 /// [7.1.2 Transaction Consensus Rules]: <https://zips.z.cash/protocol/protocol.pdf#txnconsensus>
+/// Checks that `tx`'s version is one `network` accepts at `height`.
+///
+/// # Consensus
+///
+/// Upstream networks accept every version their active network upgrade allows, which the
+/// `UnsupportedByNetworkUpgrade` check already enforces; this function is a no-op for them, so
+/// their behaviour is unchanged.
+///
+/// The SWARM production network accepts **only V5 and V6, from height 1 onward**. It starts at
+/// the NU6.3 rules with no pre-NU5 history, so no V1 to V4 transaction can ever be a historical
+/// one it has to accept. It rejects them because only V5 and V6 carry an `nConsensusBranchId`: a
+/// V1 to V4 transaction has no embedded replay domain at all, so an identical one is valid on any
+/// chain that accepts that version, and the two-way replay protection the SWARM domain provides
+/// would have a hole in it exactly the size of the transparent transaction set.
+///
+/// The genesis block at height 0 is exempt. Its coinbase is a legacy-version transaction: the
+/// SWARM genesis is produced by the `privacy-miner genesis` tool from an upstream block fixture
+/// (see `network/swarm-testnet/manifest.json`, `genesis.upstream_fixture`), whose coinbase is a
+/// V4 transaction. The exemption is safe for exactly the reason the rest of the rule exists:
+/// genesis has no `nConsensusBranchId` on any network, it is pinned by hash in the network
+/// definition and by the genesis checkpoint, and it spends nothing, so there is no replay to
+/// protect against. Height 0 is also `NetworkUpgrade::Genesis` in the SWARM activation list, for
+/// which the domain registry deliberately admits no branch ID at all.
+///
+/// This applies to block validation and to the mempool alike, because both reach it through
+/// `zebra_consensus::transaction::Verifier`.
+pub fn transaction_version_allowed(
+    tx: &Transaction,
+    height: Height,
+    network: &Network,
+) -> Result<(), TransactionError> {
+    match network {
+        Network::Mainnet | Network::Testnet(_) => Ok(()),
+        // The genesis coinbase is a legacy-version transaction on every network, including this
+        // one. See the note above for why exempting it does not weaken the rule.
+        Network::SwarmMain(_) if height == Height(0) => Ok(()),
+        Network::SwarmMain(_) => {
+            if tx.version() >= 5 {
+                Ok(())
+            } else {
+                Err(TransactionError::UnsupportedTransactionVersion {
+                    version: tx.version(),
+                    network: network.to_string(),
+                })
+            }
+        }
+    }
+}
+
 pub fn consensus_branch_id(
     tx: &Transaction,
     height: Height,

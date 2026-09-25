@@ -132,6 +132,14 @@ impl Version {
             // It should be fine to reject peers with earlier network protocol versions on custom testnets for now.
             (Testnet(_), _) => CURRENT_NETWORK_PROTOCOL_VERSION.0,
 
+            // SWARM production starts at the NU6.3 rules, so there is no earlier upgrade for a
+            // SWARM peer to have implemented and no legacy peer to stay compatible with: every
+            // peer must speak the current version. Borrowing an upstream number here would be
+            // worse than useless, because those numbers encode Zcash's deployment history, which
+            // SWARM does not share. The network magic already keeps the two peer sets apart; this
+            // makes the version floor say the same thing.
+            (SwarmMain(_), _) => CURRENT_NETWORK_PROTOCOL_VERSION.0,
+
             #[cfg(zcash_unstable = "zfuture")]
             (Mainnet, ZFuture) => {
                 panic!("ZFuture network upgrade should not be active on Mainnet")

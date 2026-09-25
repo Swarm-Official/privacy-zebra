@@ -558,6 +558,11 @@ proptest! {
                 let block: Arc<Block> = block_bytes.zcash_deserialize_into().expect("block is valid");
                 block
             },
+            // This test uses recorded Zcash genesis block vectors, which exist only for the
+            // upstream networks. SwarmMain has no default and is never passed in here.
+            Network::SwarmMain(_) => {
+                unreachable!("this test is only parameterised over the upstream networks")
+            },
         };
 
         // Genesis block fields
