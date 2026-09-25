@@ -37,7 +37,7 @@ const HELP: &str = "swarm-keytool — offline SWARM P2SH destination addresses\n
 Usage:\n\
   swarm-keytool new --threshold M --keys N --label NAME --out DIR [--network NET]\n\
   swarm-keytool address --redeem-script HEX [--network NET]\n\
-  swarm-keytool show --keys-file PATH\n\
+  swarm-keytool show --keys-file PATH [--network NET]\n\
   swarm-keytool --help\n\
 \n\
 --network is `testnet` (the default, `t2…`) or `swarmmain` (SWARM production,\n\
@@ -61,7 +61,11 @@ offline: anyone holding M of the N keys can spend from the address.\n\
 `show` reprints the PUBLIC part of an existing key file -- label, threshold,\n\
 address, redeem script and public keys -- so an operator never has to open a\n\
 key file to recover them. It never reads or prints any private key, and it\n\
-refuses if the recorded address does not match the recorded redeem script.\n\
+refuses if the recorded address does not match the recorded redeem script.
+It re-derives that address under the network the file records in its
+`network` field, so a `swarmmain` key file prints its `s3` address, and
+`--network` names the network explicitly and must agree with the file when
+the file records one. A file with no `network` field is read as testnet.\n\
 \n\
 This is a testnet engineering tool, not a key-ceremony procedure and not an\n\
 audited custody solution.";
@@ -169,6 +173,10 @@ fn check_threshold(threshold: u8, keys: u8) -> Result<(), String> {
 }
 
 /// The upstream testnet P2SH encoding of a redeem script.
+///
+/// Only the tests use this now: `show` re-derives under the network the key file records, and
+/// `new` and `address` take `--network`.
+#[cfg(test)]
 fn p2sh_testnet_address(script: &[u8]) -> Address {
     p2sh_address(NetworkKind::Testnet, script)
 }
@@ -199,6 +207,21 @@ fn network_kind(parsed: &[(String, String)]) -> Result<NetworkKind, String> {
         other => Err(format!(
             "unknown --network {other:?}; expected testnet or swarmmain"
         )),
+    }
+}
+
+/// The [`NetworkKind`] a key file's recorded `network` name means.
+///
+/// This is the inverse of [`network_name`], and accepts every name that function can write, not
+/// only the two `--network` takes: a file written by another build must be read back as what it
+/// says it is, or refused by name, never silently re-encoded as testnet.
+fn network_kind_from_name(name: &str) -> Result<NetworkKind, String> {
+    match name {
+        "testnet" => Ok(NetworkKind::Testnet),
+        "swarmmainnet" | "swarmmain" => Ok(NetworkKind::SwarmMainnet),
+        "mainnet" => Ok(NetworkKind::Mainnet),
+        "regtest" => Ok(NetworkKind::Regtest),
+        other => Err(format!("the key file records an unknown network {other:?}")),
     }
 }
 
@@ -235,22 +258,63 @@ fn cmd_address(args: &[String]) -> Result<(), String> {
 /// the public part and never touches the private material beyond leaving it in
 /// the file.
 fn cmd_show(args: &[String]) -> Result<(), String> {
-    let parsed = options(args, &["keys-file"])?;
+    let parsed = options(args, &["keys-file", "network"])?;
     let path = PathBuf::from(required(&parsed, "keys-file")?);
+    let requested = if parsed.iter().any(|(key, _)| key == "network") {
+        Some(network_kind(&parsed)?)
+    } else {
+        None
+    };
     let body = std::fs::read_to_string(&path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
     let document: serde_json::Value = serde_json::from_str(&body)
         .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))?;
-    public_summary(&document).map(|lines| {
+    public_summary(&document, requested).map(|lines| {
         for line in lines {
             println!("{line}");
         }
     })
 }
 
+/// The network a key file should be read back under.
+///
+/// # Correctness
+///
+/// The file's own `network` field is the answer. `show` used to re-derive every address with the
+/// testnet version bytes, so every `swarmmain` key file failed its own consistency check against
+/// a `t2` address it was never written with. A file with no `network` field predates the field
+/// and is a testnet file, which is what those files were written as. An explicit `--network` has
+/// to agree with a file that records one: silently overriding it would print an address the file
+/// does not contain, which is the confusion this command exists to prevent.
+fn resolve_show_network(
+    document: &serde_json::Value,
+    requested: Option<NetworkKind>,
+) -> Result<NetworkKind, String> {
+    let recorded = document
+        .get("network")
+        .and_then(|value| value.as_str())
+        .map(network_kind_from_name)
+        .transpose()?;
+
+    match (recorded, requested) {
+        (Some(recorded), Some(requested)) if recorded != requested => Err(format!(
+            "the key file records the network {:?}, but --network says {:?}",
+            network_name(recorded),
+            network_name(requested)
+        )),
+        (Some(recorded), _) => Ok(recorded),
+        (None, Some(requested)) => Ok(requested),
+        (None, None) => Ok(NetworkKind::Testnet),
+    }
+}
+
 /// Builds the printable public summary, re-deriving the address from the
 /// recorded redeem script and refusing if the two disagree.
-fn public_summary(document: &serde_json::Value) -> Result<Vec<String>, String> {
+fn public_summary(
+    document: &serde_json::Value,
+    requested: Option<NetworkKind>,
+) -> Result<Vec<String>, String> {
+    let kind = resolve_show_network(document, requested)?;
     let text = |key: &str| -> Result<String, String> {
         document
             .get(key)
@@ -262,7 +326,7 @@ fn public_summary(document: &serde_json::Value) -> Result<Vec<String>, String> {
     let recorded_address = text("address")?;
     let script = hex::decode(&redeem_hex)
         .map_err(|_| "the recorded redeem script is not hexadecimal".to_string())?;
-    let derived = p2sh_testnet_address(&script).to_string();
+    let derived = p2sh_address(kind, &script).to_string();
     if derived != recorded_address {
         return Err(format!(
             "the key file is inconsistent: its redeem script hashes to {derived}, \
@@ -281,6 +345,7 @@ fn public_summary(document: &serde_json::Value) -> Result<Vec<String>, String> {
 
     let mut lines = vec![
         format!("label          {}", text("label")?),
+        format!("network        {}", network_name(kind)),
         format!("address        {derived}"),
         format!("redeem_script  {redeem_hex}"),
     ];
@@ -657,7 +722,7 @@ mod tests {
 
         // `show` reprints the public part of that same file and never the
         // private key.
-        let lines = public_summary(&parsed).expect("public summary");
+        let lines = public_summary(&parsed, None).expect("public summary");
         let printed = lines.join("\n");
         assert!(printed.contains(&address.to_string()));
         assert!(printed.contains(&hex::encode(&script)));
@@ -683,9 +748,122 @@ mod tests {
             "redeem_script": hex::encode(&script),
             "key_material": [{"index": 0, "public_key": P1}],
         });
-        assert!(public_summary(&document).is_err());
+        assert!(public_summary(&document, None).is_err());
 
         document["address"] = serde_json::json!(p2sh_testnet_address(&script).to_string());
-        assert!(public_summary(&document).is_ok());
+        assert!(public_summary(&document, None).is_ok());
+    }
+
+    /// A `swarmmain` key file is read back under its own network, not testnet.
+    ///
+    /// The key material is the three public test scalars above (`G`, `2G`, `3G`), so this
+    /// fixture is fully deterministic and no key is generated.
+    #[test]
+    fn show_honors_a_swarmmain_key_file() {
+        let script = redeem_script(2, &[key(P1), key(P2), key(P3)]).unwrap();
+        let swarm_address = p2sh_address(NetworkKind::SwarmMainnet, &script).to_string();
+        let testnet_address = p2sh_testnet_address(&script).to_string();
+        assert!(swarm_address.starts_with("s3"), "{swarm_address}");
+        assert!(testnet_address.starts_with("t2"), "{testnet_address}");
+        assert_ne!(swarm_address, testnet_address);
+
+        let document = serde_json::json!({
+            "label": "swarm-miner",
+            "network": "swarmmainnet",
+            "address": swarm_address,
+            "threshold": 2,
+            "keys": 3,
+            "redeem_script": hex::encode(&script),
+            "key_material": [
+                {"index": 0, "public_key": P1},
+                {"index": 1, "public_key": P2},
+                {"index": 2, "public_key": P3},
+            ],
+        });
+
+        // The file's own field is enough: no --network is needed.
+        let printed = public_summary(&document, None)
+            .expect("a swarmmain key file must pass its own consistency check")
+            .join("
+");
+        assert!(printed.contains(&swarm_address), "{printed}");
+        assert!(printed.contains("network        swarmmainnet"), "{printed}");
+        assert!(
+            !printed.contains(&testnet_address),
+            "a swarmmain key file must not print a testnet address: {printed}"
+        );
+
+        // An agreeing --network is accepted and changes nothing.
+        assert_eq!(
+            public_summary(&document, Some(NetworkKind::SwarmMainnet)).unwrap(),
+            public_summary(&document, None).unwrap()
+        );
+
+        // A disagreeing --network is refused by name rather than silently re-encoding.
+        let error = public_summary(&document, Some(NetworkKind::Testnet))
+            .expect_err("--network must not override the file");
+        assert!(error.contains("swarmmainnet"), "{error}");
+        assert!(error.contains("testnet"), "{error}");
+    }
+
+    /// Testnet output is unchanged, with or without the `network` field.
+    #[test]
+    fn show_keeps_testnet_output_unchanged() {
+        let script = redeem_script(1, &[key(P1)]).unwrap();
+        let testnet_address = p2sh_testnet_address(&script).to_string();
+        let mut document = serde_json::json!({
+            "label": "legacy",
+            "address": testnet_address,
+            "threshold": 1,
+            "keys": 1,
+            "redeem_script": hex::encode(&script),
+            "key_material": [{"index": 0, "public_key": P1}],
+        });
+
+        // No `network` field: the file predates it and is a testnet file.
+        let without = public_summary(&document, None).expect("legacy key file");
+        assert!(without.iter().any(|line| line.contains(&testnet_address)));
+        assert!(without.contains(&"network        testnet".to_string()));
+
+        // --network fills in a missing field.
+        assert_eq!(
+            public_summary(&document, Some(NetworkKind::Testnet)).unwrap(),
+            without
+        );
+        assert!(public_summary(&document, Some(NetworkKind::SwarmMainnet)).is_err());
+
+        // An explicit `network` field gives the same answer.
+        document["network"] = serde_json::json!("testnet");
+        assert_eq!(public_summary(&document, None).unwrap(), without);
+    }
+
+    /// An unrecognised `network` name is refused, not read as testnet.
+    #[test]
+    fn show_refuses_an_unknown_recorded_network() {
+        let script = redeem_script(1, &[key(P1)]).unwrap();
+        let document = serde_json::json!({
+            "label": "odd",
+            "network": "dogecoin",
+            "address": p2sh_testnet_address(&script).to_string(),
+            "threshold": 1,
+            "keys": 1,
+            "redeem_script": hex::encode(&script),
+            "key_material": [{"index": 0, "public_key": P1}],
+        });
+        let error = public_summary(&document, None).expect_err("unknown network");
+        assert!(error.contains("dogecoin"), "{error}");
+    }
+
+    /// Every name `network_name` can write is a name `network_kind_from_name` can read.
+    #[test]
+    fn recorded_network_names_round_trip() {
+        for kind in [
+            NetworkKind::Mainnet,
+            NetworkKind::Testnet,
+            NetworkKind::Regtest,
+            NetworkKind::SwarmMainnet,
+        ] {
+            assert_eq!(network_kind_from_name(network_name(kind)), Ok(kind));
+        }
     }
 }
