@@ -1776,3 +1776,253 @@ fn context_and_upgrade_entry_points_agree() {
         }
     }
 }
+
+// P1c: the SWARM production transaction domain, 0x53574d31.
+//
+// Unlike the P1b2 fixture domain, this is the real production value, and the vendored
+// `zcash_protocol`/`zcash_primitives` pair admits it as `BranchId::SwarmMain`, so a SWARM
+// transaction can be hashed. These tests use `DomainRegistry::SWARM_PRODUCTION`, which no
+// production entry point selects yet; the pinned production paths are covered by the assertions
+// that they reject the SWARM domain.
+
+/// Sets a V5 or V6 transaction's raw `nConsensusBranchId` to `branch`, leaving the body alone.
+fn with_raw_domain(tx: &Transaction, branch: crate::parameters::ConsensusBranchId) -> Transaction {
+    let mut tx = tx.clone();
+    match &mut tx {
+        Transaction::V5 {
+            consensus_branch_id,
+            ..
+        }
+        | Transaction::V6 {
+            consensus_branch_id,
+            ..
+        } => *consensus_branch_id = branch,
+        _ => unreachable!("only V5 and V6 carry a raw consensus branch ID"),
+    }
+    tx
+}
+
+/// A V5 and a V6 transaction in the SWARM production domain serialize, decode and hash under
+/// `DomainRegistry::SWARM_PRODUCTION`, and the same body under upstream NU6.3 hashes differently.
+///
+/// Covers (a): the raw ID 0x53574d31 survives serialization intact, decodes back to the same
+/// transaction, and txid, authorizing data commitment and sighash are all computable and all
+/// differ from the upstream NU6.3 values for an identical body.
+#[test]
+fn swarm_production_domain_v5_and_v6_serialize_decode_and_hash() {
+    use crate::parameters::{DomainRegistry, SWARM_PRODUCTION_DOMAIN};
+
+    let _init_guard = zebra_test::init();
+
+    let swarm_ctx = DomainRegistry::SWARM_PRODUCTION
+        .context_for_rules(NetworkUpgrade::Nu6_3)
+        .expect("the SWARM registry has an NU6.3 domain");
+    let upstream_ctx = DomainRegistry::UPSTREAM
+        .context_for_rules(NetworkUpgrade::Nu6_3)
+        .expect("NU6.3 has an upstream domain");
+
+    // Same rules, different domain: the case upstream cannot express.
+    assert_eq!(swarm_ctx.rules(), upstream_ctx.rules());
+    assert_eq!(swarm_ctx.branch(), SWARM_PRODUCTION_DOMAIN);
+    assert_ne!(swarm_ctx.branch(), upstream_ctx.branch());
+
+    let mut upstream_v5 = EMPTY_V5_TX.clone();
+    upstream_v5
+        .update_network_upgrade(NetworkUpgrade::Nu6_3)
+        .expect("NU6.3 has a branch ID");
+    let upstream_v6 = arbitrary::fake_v6_transaction(NetworkUpgrade::Nu6_3, None, None);
+
+    for upstream_tx in [upstream_v5, upstream_v6] {
+        let swarm_tx = with_raw_domain(&upstream_tx, SWARM_PRODUCTION_DOMAIN);
+        assert_eq!(
+            swarm_tx.consensus_branch_id(),
+            Some(SWARM_PRODUCTION_DOMAIN)
+        );
+        // The SWARM domain is not in the closed upstream table, so it names no upstream upgrade.
+        assert_eq!(swarm_tx.network_upgrade(), None);
+
+        // The raw domain is written verbatim, and the two encodings differ only in those bytes.
+        let upstream_bytes = upstream_tx
+            .zcash_serialize_to_vec()
+            .expect("the upstream NU6.3 transaction serializes");
+        let mut swarm_bytes = Vec::new();
+        swarm_tx
+            .zcash_serialize_in(&mut swarm_bytes, DomainRegistry::SWARM_PRODUCTION)
+            .expect("the SWARM registry admits the SWARM domain");
+        assert_eq!(
+            &swarm_bytes[8..12],
+            &0x5357_4d31u32.to_le_bytes(),
+            "the production domain is written exactly as stored"
+        );
+        let mut patched = swarm_bytes.clone();
+        patched[8..12].copy_from_slice(&upstream_bytes[8..12]);
+        assert_eq!(
+            patched, upstream_bytes,
+            "the two domains encode identical transaction bodies"
+        );
+
+        // It decodes back to the same transaction, raw domain intact.
+        let decoded = Transaction::zcash_deserialize_in(
+            swarm_bytes.as_slice(),
+            DomainRegistry::SWARM_PRODUCTION,
+        )
+        .expect("the SWARM registry decodes its own domain");
+        assert_eq!(decoded, swarm_tx);
+        assert_eq!(decoded.consensus_branch_id(), Some(SWARM_PRODUCTION_DOMAIN));
+
+        // The digests are computable in the SWARM context, and all three differ from the upstream
+        // NU6.3 values for the identical body.
+        let swarm_txid = swarm_tx
+            .hash_in(&swarm_ctx)
+            .expect("the SWARM transaction hashes in its own context");
+        let upstream_txid = upstream_tx
+            .hash_in(&upstream_ctx)
+            .expect("the upstream transaction hashes in its own context");
+        assert_ne!(swarm_txid, upstream_txid, "the domain separates txids");
+        assert_eq!(
+            upstream_txid,
+            upstream_tx.hash(),
+            "the upstream value is unchanged by this patch"
+        );
+
+        let swarm_auth = swarm_tx
+            .auth_digest_in(&swarm_ctx)
+            .expect("the SWARM transaction has an authorizing data commitment");
+        let upstream_auth = upstream_tx
+            .auth_digest_in(&upstream_ctx)
+            .expect("the upstream transaction has an authorizing data commitment");
+        assert_ne!(
+            swarm_auth, upstream_auth,
+            "the domain separates authorizing data commitments"
+        );
+        assert_eq!(Some(upstream_auth), upstream_tx.auth_digest());
+
+        let swarm_sighash = swarm_tx
+            .sighash_in(&swarm_ctx, HashType::ALL, Arc::new(Vec::new()), None)
+            .expect("the SWARM transaction has a sighash");
+        let upstream_sighash = upstream_tx
+            .sighash_in(&upstream_ctx, HashType::ALL, Arc::new(Vec::new()), None)
+            .expect("the upstream transaction has a sighash");
+        assert_ne!(
+            swarm_sighash, upstream_sighash,
+            "the domain separates sighashes"
+        );
+    }
+}
+
+/// A SWARM transaction is rejected under an upstream NU6.3 context and vice versa, and the
+/// production (upstream-pinned) encoder and decoder reject the SWARM domain outright.
+///
+/// Covers (b) and (c).
+#[test]
+fn swarm_production_domain_is_rejected_by_upstream_and_vice_versa() {
+    use crate::parameters::{DomainRegistry, SWARM_PRODUCTION_DOMAIN};
+
+    let _init_guard = zebra_test::init();
+
+    let swarm_ctx = DomainRegistry::SWARM_PRODUCTION
+        .context_for_rules(NetworkUpgrade::Nu6_3)
+        .expect("the SWARM registry has an NU6.3 domain");
+    let upstream_ctx = DomainRegistry::UPSTREAM
+        .context_for_rules(NetworkUpgrade::Nu6_3)
+        .expect("NU6.3 has an upstream domain");
+
+    let mut upstream_v5 = EMPTY_V5_TX.clone();
+    upstream_v5
+        .update_network_upgrade(NetworkUpgrade::Nu6_3)
+        .expect("NU6.3 has a branch ID");
+    let upstream_v6 = arbitrary::fake_v6_transaction(NetworkUpgrade::Nu6_3, None, None);
+
+    for upstream_tx in [upstream_v5, upstream_v6] {
+        let swarm_tx = with_raw_domain(&upstream_tx, SWARM_PRODUCTION_DOMAIN);
+
+        // (b) Verifying a SWARM transaction under an upstream NU6.3 context fails, although the
+        // rules are the same, and the reverse fails too.
+        assert!(matches!(
+            swarm_tx.to_librustzcash_in(&upstream_ctx),
+            Err(crate::Error::InvalidConsensusBranchId)
+        ));
+        assert!(matches!(
+            upstream_tx.to_librustzcash_in(&swarm_ctx),
+            Err(crate::Error::InvalidConsensusBranchId)
+        ));
+        assert_eq!(swarm_tx.hash_in(&upstream_ctx), None);
+        assert_eq!(upstream_tx.hash_in(&swarm_ctx), None);
+        assert_eq!(swarm_tx.auth_digest_in(&upstream_ctx), None);
+        assert_eq!(upstream_tx.auth_digest_in(&swarm_ctx), None);
+        assert!(matches!(
+            PrecomputedTxData::new_in(&swarm_tx, &upstream_ctx, Arc::new(Vec::new())),
+            Err(crate::Error::InvalidConsensusBranchId)
+        ));
+        assert!(matches!(
+            PrecomputedTxData::new_in(&upstream_tx, &swarm_ctx, Arc::new(Vec::new())),
+            Err(crate::Error::InvalidConsensusBranchId)
+        ));
+        assert!(matches!(
+            SigHasher::new_in(&swarm_tx, &upstream_ctx, Arc::new(Vec::new())),
+            Err(crate::Error::InvalidConsensusBranchId)
+        ));
+        assert!(matches!(
+            SigHasher::new_in(&upstream_tx, &swarm_ctx, Arc::new(Vec::new())),
+            Err(crate::Error::InvalidConsensusBranchId)
+        ));
+
+        let mut swarm_bytes = Vec::new();
+        swarm_tx
+            .zcash_serialize_in(&mut swarm_bytes, DomainRegistry::SWARM_PRODUCTION)
+            .expect("the SWARM registry admits the SWARM domain");
+        let upstream_bytes = upstream_tx
+            .zcash_serialize_to_vec()
+            .expect("the upstream transaction serializes");
+
+        // (c) The production encoder and the production wire decoder are pinned to the upstream
+        // registry, so neither accepts the SWARM domain.
+        let error = swarm_tx
+            .zcash_serialize_to_vec()
+            .expect_err("the production encoder rejects the SWARM domain");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            swarm_bytes
+                .as_slice()
+                .zcash_deserialize_into::<Transaction>()
+                .is_err(),
+            "the production wire decoder rejects wire bytes carrying 0x53574d31"
+        );
+        assert!(
+            Transaction::zcash_deserialize_in(swarm_bytes.as_slice(), DomainRegistry::UPSTREAM)
+                .is_err(),
+            "the upstream registry rejects wire bytes carrying 0x53574d31"
+        );
+
+        // And the other direction: the SWARM registry rejects upstream wire bytes.
+        assert!(
+            Transaction::zcash_deserialize_in(
+                upstream_bytes.as_slice(),
+                DomainRegistry::SWARM_PRODUCTION
+            )
+            .is_err(),
+            "the SWARM registry rejects wire bytes carrying the upstream NU6.3 domain"
+        );
+        assert!(swarm_tx
+            .zcash_serialize_in(&mut Vec::new(), DomainRegistry::UPSTREAM)
+            .is_err());
+        assert!(upstream_tx
+            .zcash_serialize_in(&mut Vec::new(), DomainRegistry::SWARM_PRODUCTION)
+            .is_err());
+
+        // The upstream transaction is untouched: in its own context it still produces exactly the
+        // values the upgrade-only entry points produce.
+        assert_eq!(upstream_tx.hash_in(&upstream_ctx), Some(upstream_tx.hash()));
+        assert_eq!(
+            upstream_tx.auth_digest_in(&upstream_ctx),
+            upstream_tx.auth_digest()
+        );
+        assert_eq!(
+            upstream_bytes
+                .as_slice()
+                .zcash_deserialize_into::<Transaction>()
+                .expect("the production decoder still accepts upstream NU6.3 bytes"),
+            upstream_tx
+        );
+    }
+}

@@ -735,6 +735,26 @@ pub enum BranchId {
     /// The consensus rules to be deployed by [`NetworkUpgrade::Nu7`].
     #[cfg(zcash_unstable = "nu7")]
     Nu7,
+    /// The SWARM production transaction domain for the NU6.3 (Ironwood) consensus rules.
+    ///
+    /// SWARM is a separate chain that runs the NU6.3 rule revision from height 1. Its
+    /// transactions must not be replayable on Zcash and Zcash transactions must not be
+    /// replayable on SWARM, so it needs its own `nConsensusBranchId` (ZIP 200) while running
+    /// the same rules. This variant is that domain: `0x53574d31`, the ASCII bytes `SWM1`.
+    ///
+    /// # Correctness
+    ///
+    /// Every rule-selecting method on this type answers for `SwarmMain` exactly what it answers
+    /// for [`BranchId::Nu6_3`]: the rules are the same, only the replay domain differs. The one
+    /// deliberate exception is [`BranchId::for_height`], which walks `UPGRADES_IN_ORDER` and so
+    /// can only ever return a domain that some [`NetworkUpgrade`] names; no network upgrade names
+    /// this one, so `for_height` never returns it for the upstream `Main`, `Test` or `Regtest`
+    /// networks. Mapping a SWARM activation schedule onto this domain is the job of the SWARM
+    /// network profile, not of this table.
+    //
+    // TODO(P1c-next): when `NetworkType::SwarmMain` exists, add the SWARM production activation
+    // schedule so that `for_height` returns `SwarmMain` for that network type and only for it.
+    SwarmMain,
 }
 
 #[cfg(feature = "std")]
@@ -758,6 +778,7 @@ impl TryFrom<u32> for BranchId {
             0x37a5_165b => Ok(BranchId::Nu6_3),
             #[cfg(zcash_unstable = "nu7")]
             0xffff_ffff => Ok(BranchId::Nu7),
+            0x5357_4d31 => Ok(BranchId::SwarmMain),
             _ => Err("Unknown consensus branch ID"),
         }
     }
@@ -779,6 +800,7 @@ impl From<BranchId> for u32 {
             BranchId::Nu6_3 => 0x37a5_165b,
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => 0xffff_ffff,
+            BranchId::SwarmMain => 0x5357_4d31,
         }
     }
 }
@@ -788,6 +810,14 @@ impl BranchId {
     /// the given height.
     ///
     /// This is the branch ID that should be used when creating transactions.
+    ///
+    /// # Correctness
+    ///
+    /// This walks `UPGRADES_IN_ORDER` and returns `nu.branch_id()`, so it can only return a
+    /// domain that some [`NetworkUpgrade`] names. [`BranchId::SwarmMain`] is named by no network
+    /// upgrade, so this never returns it, for any `Parameters` implementation including `Main`,
+    /// `Test` and `Regtest`. Selecting the SWARM production domain is the SWARM network profile's
+    /// job, not this function's.
     pub fn for_height<P: Parameters>(parameters: &P, height: BlockHeight) -> Self {
         for nu in UPGRADES_IN_ORDER.iter().rev() {
             if parameters.is_nu_active(*nu, height) {
@@ -818,6 +848,8 @@ impl BranchId {
             BranchId::Nu6_3 => NetworkUpgrade::Nu6_3,
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => NetworkUpgrade::Nu7,
+            // The SWARM production domain selects the NU6.3 rule revision.
+            BranchId::SwarmMain => NetworkUpgrade::Nu6_3,
         })
     }
 
@@ -876,7 +908,9 @@ impl BranchId {
             BranchId::Nu6_2 => params
                 .activation_height(NetworkUpgrade::Nu6_2)
                 .map(|lower| (lower, params.activation_height(NetworkUpgrade::Nu6_3))),
-            BranchId::Nu6_3 => params
+            // `SwarmMain` selects the NU6.3 rules, so its epoch is the NU6.3 epoch of whatever
+            // `params` describes.
+            BranchId::Nu6_3 | BranchId::SwarmMain => params
                 .activation_height(NetworkUpgrade::Nu6_3)
                 .map(|lower| {
                     #[cfg(zcash_unstable = "nu7")]
@@ -892,6 +926,9 @@ impl BranchId {
         }
     }
 
+    /// Returns `true` for consensus branches in which Sprout uses Groth16 proofs.
+    ///
+    /// `SwarmMain` is not listed, so it answers `true`, exactly as [`BranchId::Nu6_3`] does.
     pub fn sprout_uses_groth_proofs(&self) -> bool {
         !matches!(self, BranchId::Sprout | BranchId::Overwinter)
     }
@@ -902,7 +939,7 @@ impl BranchId {
         match self {
             Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6 | Nu6_1
             | Nu6_2 => true,
-            BranchId::Nu6_3 => true,
+            BranchId::Nu6_3 | BranchId::SwarmMain => true,
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => false,
         }
@@ -914,7 +951,7 @@ impl BranchId {
         match self {
             Sprout | Overwinter => false,
             Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6 | Nu6_1 | Nu6_2 => true,
-            BranchId::Nu6_3 => true,
+            BranchId::Nu6_3 | BranchId::SwarmMain => true,
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => true,
         }
@@ -926,7 +963,7 @@ impl BranchId {
         match self {
             Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy => false,
             Nu5 | Nu6 | Nu6_1 | Nu6_2 => true,
-            BranchId::Nu6_3 => true,
+            BranchId::Nu6_3 | BranchId::SwarmMain => true,
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => true,
         }
@@ -941,7 +978,7 @@ impl BranchId {
             Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy => None,
             Nu5 | Nu6 | Nu6_1 => Some(OrchardProtocolRevision::InsecureV1),
             Nu6_2 => Some(OrchardProtocolRevision::V2),
-            Nu6_3 => Some(OrchardProtocolRevision::V3),
+            Nu6_3 | SwarmMain => Some(OrchardProtocolRevision::V3),
             #[cfg(zcash_unstable = "nu7")]
             Nu7 => Some(OrchardProtocolRevision::V3),
         }
@@ -978,6 +1015,11 @@ pub mod testing {
 
     use super::{BlockHeight, BranchId, Parameters};
 
+    /// An arbitrary upstream [`BranchId`].
+    ///
+    /// [`BranchId::SwarmMain`] is deliberately absent: these strategies are used with upstream
+    /// `Parameters` implementations, under which the SWARM production domain is never in effect,
+    /// and including it would change the distribution the upstream proptests sample.
     pub fn arb_branch_id() -> impl Strategy<Value = BranchId> {
         select(vec![
             BranchId::Sprout,

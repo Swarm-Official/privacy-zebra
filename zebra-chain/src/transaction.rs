@@ -1693,8 +1693,15 @@ impl Transaction {
             return Err(crate::Error::InvalidConsensusBranchId);
         };
 
+        // The raw domain has just been matched against `ctx`, whose own domain came from a
+        // registry, so the registry gate in `zcash_serialize_in` has nothing left to decide here.
+        // Going through it anyway would be wrong: it is pinned to the upstream table, and would
+        // reject a domain that this context legitimately admits.
+        let mut data = Vec::new();
+        self.zcash_serialize_admitted(&mut data)?;
+
         Ok(zcash_primitives::transaction::Transaction::read(
-            &self.zcash_serialize_to_vec()?[..],
+            &data[..],
             branch_id,
         )?)
     }

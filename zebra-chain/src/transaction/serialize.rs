@@ -605,10 +605,9 @@ impl Transaction {
     /// The registry only decides which raw `nConsensusBranchId` values may be written; it never
     /// supplies one. A V5/V6 transaction's stored raw domain is always written verbatim and is
     /// never regenerated from a rule.
-    #[allow(clippy::unwrap_in_result)]
     pub(crate) fn zcash_serialize_in<W: io::Write>(
         &self,
-        mut writer: W,
+        writer: W,
         registry: &DomainRegistry,
     ) -> Result<(), io::Error> {
         // Reject unknown domains before writing even the transaction header.
@@ -621,6 +620,24 @@ impl Transaction {
             }
         }
 
+        self.zcash_serialize_admitted(writer)
+    }
+
+    /// Serializes this transaction without re-checking which domain it carries.
+    ///
+    /// # Correctness
+    ///
+    /// The caller must already have established that this transaction's raw domain is admitted:
+    /// either by looking it up in a [`DomainRegistry`], as [`Transaction::zcash_serialize_in`]
+    /// does, or by matching it against a `ConsensusContext`, which can only be obtained from a
+    /// registry, as `Transaction::to_librustzcash_in` does. This is private to the crate and
+    /// has no production caller of its own, so the wire is still reachable only through a
+    /// registry check.
+    #[allow(clippy::unwrap_in_result)]
+    pub(crate) fn zcash_serialize_admitted<W: io::Write>(
+        &self,
+        mut writer: W,
+    ) -> Result<(), io::Error> {
         // Post-Sapling, transaction size is limited to MAX_BLOCK_BYTES.
         // (Strictly, the maximum transaction size is about 1.5 kB less,
         // because blocks also include a block header.)

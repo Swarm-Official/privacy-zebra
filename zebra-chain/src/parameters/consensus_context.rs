@@ -16,10 +16,22 @@
 //! # Production domains
 //!
 //! No SWARM production consensus branch ID is admitted by [`DomainRegistry::UPSTREAM`], and this
-//! module deliberately provides no way to add one at runtime. A production domain requires a
-//! reviewed numeric value, a reviewed rule revision to bind it to, and a network variant to carry
-//! it; none of those exist yet. The only non-upstream domain defined here is
-//! [`FIXTURE_NU6_3_DOMAIN`], which is `#[cfg(test)]` test data.
+//! module deliberately provides no way to add one at runtime.
+//!
+//! [`SWARM_PRODUCTION_DOMAIN`] is the SWARM chain's own domain, `0x53574d31`, and
+//! [`DomainRegistry::SWARM_PRODUCTION`] is the registry that admits it and nothing else. The two
+//! registries are disjoint in both directions, which is exactly the two-way replay protection
+//! ZIP 200 domains exist for: an upstream transaction is rejected under the SWARM registry and a
+//! SWARM transaction is rejected under the upstream one.
+//!
+//! This patch does not yet *select* that registry anywhere. Every production entry point --
+//! `ZcashSerialize`/`ZcashDeserialize` for `Transaction`, the upgrade-only hashing wrappers and
+//! the ZIP-221 history domain -- stays pinned to [`DomainRegistry::UPSTREAM`]. Choosing the
+//! registry from the network is the next slice, and needs the SWARM network variant to exist
+//! first.
+//!
+//! The remaining non-upstream domain defined here is [`FIXTURE_NU6_3_DOMAIN`], which is
+//! `#[cfg(test)]` test data.
 
 use crate::block;
 use crate::parameters::{ConsensusBranchId, Network, NetworkUpgrade, CONSENSUS_BRANCH_IDS};
@@ -81,6 +93,35 @@ pub(crate) const FIXTURE_NU6_3_DOMAIN: ConsensusBranchId = ConsensusBranchId(0x7
 const FIXTURE_DOMAINS: &[(NetworkUpgrade, ConsensusBranchId)] =
     &[(NetworkUpgrade::Nu6_3, FIXTURE_NU6_3_DOMAIN)];
 
+/// The SWARM production transaction domain: `0x53574d31`, the ASCII bytes `SWM1`.
+///
+/// This is the `nConsensusBranchId` (ZIP 200) that SWARM production V5 and V6 transactions commit
+/// to. SWARM runs the NU6.3 (Ironwood) rule revision from height 1, so it needs the same *rules*
+/// as upstream NU6.3 but a different *domain*, otherwise transactions would replay between the
+/// two chains in both directions.
+///
+/// # Correctness
+///
+/// This value is disjoint from every entry in [`CONSENSUS_BRANCH_IDS`], and it is admitted only
+/// by [`DomainRegistry::SWARM_PRODUCTION`]. It is the same value as
+/// `zcash_protocol::consensus::BranchId::SwarmMain`, which the vendored protocol crate admits so
+/// that the ZIP-244 digests can be computed over it; the test
+/// `swarm_production_domain_matches_the_vendored_protocol_crate` pins the two together.
+pub const SWARM_PRODUCTION_DOMAIN: ConsensusBranchId = ConsensusBranchId(0x5357_4d31);
+
+/// The `(rules, domain)` table of the SWARM production profile.
+///
+/// # Correctness
+///
+/// SWARM activates every network upgrade at height 1, so `NetworkUpgrade::current` returns
+/// `Genesis` at height 0 and the NU6.3 rules at every height from 1 on, exactly as the SWARM
+/// testnet schedule behaves today. `Genesis` and `BeforeOverwinter` have no consensus branch ID
+/// in any registry, including the upstream one, so a single NU6.3 entry covers the whole
+/// schedule; no pre-NU6.3 entry is reachable, and adding one would be worse than useless, because
+/// admitting an upstream domain here would break replay protection in the inbound direction.
+const SWARM_PRODUCTION_DOMAINS: &[(NetworkUpgrade, ConsensusBranchId)] =
+    &[(NetworkUpgrade::Nu6_3, SWARM_PRODUCTION_DOMAIN)];
+
 /// A closed table mapping admitted transaction domains to the consensus rules they select.
 ///
 /// # Correctness
@@ -92,9 +133,10 @@ const FIXTURE_DOMAINS: &[(NetworkUpgrade, ConsensusBranchId)] =
 pub struct DomainRegistry {
     /// A short name used in diagnostics.
     name: &'static str,
-    /// The closed upstream `(rules, domain)` table.
+    /// The profile's closed `(rules, domain)` table: the upstream table for every upstream
+    /// registry, and the SWARM table for [`DomainRegistry::SWARM_PRODUCTION`].
     base: &'static [(NetworkUpgrade, ConsensusBranchId)],
-    /// Extra admitted domains. Empty outside tests.
+    /// Extra admitted domains. Empty in every registry that exists in a non-test build.
     extra: &'static [(NetworkUpgrade, ConsensusBranchId)],
 }
 
@@ -110,6 +152,25 @@ impl DomainRegistry {
     pub const UPSTREAM: &'static DomainRegistry = &DomainRegistry {
         name: "upstream",
         base: CONSENSUS_BRANCH_IDS,
+        extra: &[],
+    };
+
+    /// The SWARM production registry: the SWARM domain under the NU6.3 rules, and nothing else.
+    ///
+    /// # Correctness
+    ///
+    /// This registry and [`DomainRegistry::UPSTREAM`] are disjoint in both directions. It admits
+    /// [`SWARM_PRODUCTION_DOMAIN`] and no upstream domain, so an upstream NU6.3 transaction is
+    /// rejected under it; and [`DomainRegistry::UPSTREAM`] does not admit
+    /// [`SWARM_PRODUCTION_DOMAIN`], so a SWARM transaction is rejected under that one. That pair
+    /// of rejections is the two-way replay protection.
+    ///
+    /// No production entry point selects this registry yet. It is reachable only by explicitly
+    /// naming it, which at this point only tests do; the network-driven selection is the next
+    /// slice and needs the SWARM network variant.
+    pub const SWARM_PRODUCTION: &'static DomainRegistry = &DomainRegistry {
+        name: "swarm-production",
+        base: SWARM_PRODUCTION_DOMAINS,
         extra: &[],
     };
 
@@ -266,6 +327,183 @@ mod tests {
             DomainRegistry::UPSTREAM.context_for_rules(NetworkUpgrade::BeforeOverwinter),
             None
         );
+    }
+
+    /// The SWARM production domain is the value the identity proposal froze, and is the same
+    /// value the vendored `zcash_protocol` admits as `BranchId::SwarmMain`.
+    #[test]
+    fn swarm_production_domain_matches_the_vendored_protocol_crate() {
+        assert_eq!(u32::from(SWARM_PRODUCTION_DOMAIN), 0x5357_4d31);
+        assert_eq!(
+            u32::from(SWARM_PRODUCTION_DOMAIN).to_be_bytes(),
+            *b"SWM1",
+            "the domain is the ASCII bytes SWM1"
+        );
+
+        let branch =
+            zcash_protocol::consensus::BranchId::try_from(u32::from(SWARM_PRODUCTION_DOMAIN))
+                .expect("the vendored protocol crate admits the SWARM production domain");
+        assert_eq!(branch, zcash_protocol::consensus::BranchId::SwarmMain);
+        assert_eq!(u32::from(branch), u32::from(SWARM_PRODUCTION_DOMAIN));
+
+        // The SWARM domain selects the NU6.3 rules, and answers every rule question exactly as
+        // NU6.3 does.
+        let nu6_3 = zcash_protocol::consensus::BranchId::Nu6_3;
+        assert_eq!(
+            branch.network_upgrade(),
+            Some(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+        );
+        assert_eq!(branch.network_upgrade(), nu6_3.network_upgrade());
+        assert_eq!(branch.has_sprout(), nu6_3.has_sprout());
+        assert_eq!(branch.has_sapling(), nu6_3.has_sapling());
+        assert_eq!(branch.has_orchard(), nu6_3.has_orchard());
+        assert_eq!(
+            branch.sprout_uses_groth_proofs(),
+            nu6_3.sprout_uses_groth_proofs()
+        );
+        assert_eq!(
+            branch.orchard_protocol_revision(),
+            nu6_3.orchard_protocol_revision()
+        );
+        assert_eq!(
+            branch.height_bounds(&zcash_protocol::consensus::MAIN_NETWORK),
+            nu6_3.height_bounds(&zcash_protocol::consensus::MAIN_NETWORK)
+        );
+        assert_eq!(
+            branch.height_bounds(&zcash_protocol::consensus::TEST_NETWORK),
+            nu6_3.height_bounds(&zcash_protocol::consensus::TEST_NETWORK)
+        );
+    }
+
+    /// `BranchId::for_height` never returns the SWARM domain for an upstream network.
+    ///
+    /// The SWARM domain is named by no [`NetworkUpgrade`], and `for_height` can only return a
+    /// domain that some upgrade names, so this holds structurally; it is asserted here over the
+    /// upstream `Main` and `Test` parameters and over Zebra's own `Mainnet`, default testnet and
+    /// Regtest networks, which all implement the same `Parameters` trait.
+    #[test]
+    fn upstream_networks_never_select_the_swarm_domain_by_height() {
+        use zcash_protocol::consensus::{BlockHeight, BranchId, MAIN_NETWORK, TEST_NETWORK};
+
+        let heights = [
+            0u32,
+            1,
+            2,
+            419_200,
+            1_046_400,
+            2_726_400,
+            5_000_000,
+            u32::MAX,
+        ];
+
+        for height in heights {
+            let height = BlockHeight::from_u32(height);
+            assert_ne!(
+                BranchId::for_height(&MAIN_NETWORK, height),
+                BranchId::SwarmMain
+            );
+            assert_ne!(
+                BranchId::for_height(&TEST_NETWORK, height),
+                BranchId::SwarmMain
+            );
+        }
+
+        for network in [
+            Network::Mainnet,
+            Network::new_default_testnet(),
+            Network::new_regtest(Default::default()),
+        ] {
+            for height in heights {
+                let height = BlockHeight::from_u32(height);
+                assert_ne!(
+                    BranchId::for_height(&network, height),
+                    BranchId::SwarmMain,
+                    "{network} height {height:?} must not select the SWARM production domain"
+                );
+            }
+        }
+    }
+
+    /// The SWARM production registry admits exactly one domain, and is disjoint from the upstream
+    /// registry in both directions.
+    #[test]
+    fn swarm_production_registry_is_disjoint_from_upstream() {
+        let _init_guard = zebra_test::init();
+
+        let swarm = DomainRegistry::SWARM_PRODUCTION
+            .context_for_branch(SWARM_PRODUCTION_DOMAIN)
+            .expect("the SWARM registry admits the SWARM domain");
+        assert_eq!(swarm.rules(), NetworkUpgrade::Nu6_3);
+        assert_eq!(swarm.branch(), SWARM_PRODUCTION_DOMAIN);
+        assert_eq!(
+            DomainRegistry::SWARM_PRODUCTION.context_for_rules(NetworkUpgrade::Nu6_3),
+            Some(swarm)
+        );
+
+        // Outbound: no upstream domain is admitted here, including upstream NU6.3, which selects
+        // the very same rules.
+        for (_rules, branch) in CONSENSUS_BRANCH_IDS {
+            assert!(
+                !DomainRegistry::SWARM_PRODUCTION.admits(*branch),
+                "the SWARM registry must not admit the upstream domain {branch}"
+            );
+        }
+
+        // Inbound: the upstream registry does not admit the SWARM domain.
+        assert!(!DomainRegistry::UPSTREAM.admits(SWARM_PRODUCTION_DOMAIN));
+        assert_eq!(
+            DomainRegistry::UPSTREAM.context_for_branch(SWARM_PRODUCTION_DOMAIN),
+            None
+        );
+        assert!(NetworkUpgrade::try_from(u32::from(SWARM_PRODUCTION_DOMAIN)).is_err());
+
+        // The fixture registry is likewise unrelated to the production domain.
+        assert!(!DomainRegistry::FIXTURE.admits(SWARM_PRODUCTION_DOMAIN));
+        assert!(!DomainRegistry::SWARM_PRODUCTION.admits(FIXTURE_NU6_3_DOMAIN));
+
+        // Rules with no consensus branch ID have no context here either, so a height-1 schedule
+        // resolves height 0 (Genesis) to no domain, exactly as upstream does.
+        assert_eq!(
+            DomainRegistry::SWARM_PRODUCTION.context_for_rules(NetworkUpgrade::Genesis),
+            None
+        );
+        assert_eq!(
+            DomainRegistry::SWARM_PRODUCTION.context_for_rules(NetworkUpgrade::BeforeOverwinter),
+            None
+        );
+    }
+
+    /// `context_at` under the SWARM registry yields the SWARM context exactly at the heights
+    /// whose rules are NU6.3, which for a schedule with every activation at height 1 is every
+    /// height from 1 on.
+    #[test]
+    fn swarm_production_registry_resolves_heights_by_rules() {
+        let _init_guard = zebra_test::init();
+
+        for network in [Network::Mainnet, Network::new_default_testnet()] {
+            let mut heights: Vec<block::Height> = vec![block::Height(0), block::Height(1)];
+            for (height, _) in network.full_activation_list() {
+                heights.push(height);
+                if let Ok(after) = height.next() {
+                    heights.push(after);
+                }
+            }
+
+            for height in heights {
+                let rules = NetworkUpgrade::current(&network, height);
+                let expected = (rules == NetworkUpgrade::Nu6_3).then(|| {
+                    DomainRegistry::SWARM_PRODUCTION
+                        .context_for_rules(NetworkUpgrade::Nu6_3)
+                        .expect("NU6.3 has a SWARM domain")
+                });
+
+                assert_eq!(
+                    DomainRegistry::SWARM_PRODUCTION.context_at(&network, height),
+                    expected,
+                    "{network} height {height:?}: the SWARM registry admits only the NU6.3 rules"
+                );
+            }
+        }
     }
 
     /// The test fixture adds a second domain for the NU6.3 rules without changing any height's

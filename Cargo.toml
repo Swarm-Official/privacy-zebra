@@ -1,5 +1,9 @@
 [workspace]
-exclude = ["vendor/zcash_address", "vendor/zcash_protocol"]
+exclude = [
+        "vendor/zcash_address",
+        "vendor/zcash_primitives",
+        "vendor/zcash_protocol",
+]
 members = [
         "zebrad",
         "zebra-chain",
@@ -29,6 +33,10 @@ edition = "2021"
 
 [patch.crates-io]
 zcash_address = { path = "vendor/zcash_address" }
+# The SWARM production transaction domain `BranchId::SwarmMain` (0x53574d31) is admitted by the
+# vendored `zcash_protocol`; `zcash_primitives` matches `BranchId` exhaustively, so it has to be
+# vendored from the same published sources and patched alongside it. Neither version is bumped.
+zcash_primitives = { path = "vendor/zcash_primitives" }
 zcash_protocol = { path = "vendor/zcash_protocol" }
 
 # `cargo release` settings

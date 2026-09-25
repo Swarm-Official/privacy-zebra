@@ -25,7 +25,7 @@ pub mod arbitrary;
 
 #[cfg(test)]
 pub(crate) use consensus_context::FIXTURE_NU6_3_DOMAIN;
-pub use consensus_context::{ConsensusContext, DomainRegistry};
+pub use consensus_context::{ConsensusContext, DomainRegistry, SWARM_PRODUCTION_DOMAIN};
 pub use genesis::*;
 pub use network::{magic::Magic, subsidy, testnet, Network, NetworkKind};
 pub use network_upgrade::*;
