@@ -21,7 +21,20 @@ use zebra_chain::{
 };
 
 use crate::client::TransactionTemplate;
-use crate::config::mining::{default_miner_address, MinerAddressType};
+use crate::config::mining::MinerAddressType;
+
+/// The hard-coded default miner address for an upstream network, or a panic.
+///
+/// `crate::config::mining::default_miner_address` returns `None` for networks that have no
+/// built-in payout address (SWARM production). Every network in this file is an upstream one,
+/// so unwrapping here keeps the call sites unchanged while the library stays fallible.
+fn default_miner_address(
+    kind: zebra_chain::parameters::NetworkKind,
+    addr_type: &MinerAddressType,
+) -> &'static str {
+    crate::config::mining::default_miner_address(kind, addr_type)
+        .expect("upstream networks have a hard-coded default miner address")
+}
 
 use super::MinerParams;
 

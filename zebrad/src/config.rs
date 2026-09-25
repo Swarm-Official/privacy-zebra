@@ -189,12 +189,20 @@ impl ZebradConfig {
 }
 
 impl With<MinerAddressType> for ZebradConfig {
+    /// # Correctness
+    ///
+    /// Networks with no hard-coded default payout address leave `mining.miner_address` unset
+    /// rather than borrowing another network's. On `NetworkKind::SwarmMainnet` the only
+    /// candidate would be a re-encoding of an upstream test vector whose spending key is public,
+    /// so an unset address (which disables mining until the operator configures one) is the only
+    /// safe answer. This used to index a map infallibly and panicked on SwarmMain.
     fn with(mut self, miner_address_type: MinerAddressType) -> Self {
-        self.mining.miner_address = Some(
-            default_miner_address(self.network.network.kind(), &miner_address_type)
-                .parse()
-                .expect("valid hard-coded address"),
-        );
+        self.mining.miner_address =
+            default_miner_address(self.network.network.kind(), &miner_address_type).map(|address| {
+                address
+                    .parse()
+                    .expect("hard-coded default miner addresses are valid")
+            });
 
         self
     }

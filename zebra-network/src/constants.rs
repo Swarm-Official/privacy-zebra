@@ -431,6 +431,15 @@ lazy_static! {
     ///
     /// The minimum network protocol version typically changes after Mainnet and
     /// Testnet network upgrades.
+    ///
+    /// # Correctness
+    ///
+    /// This table is a cache of the answers for the networks that can be constructed without
+    /// configuration, not an exhaustive index of [`NetworkKind`]. A network that is absent is
+    /// **not** an error: `Version::initial_min_for_network` falls through to
+    /// `Version::min_specified_for_upgrade` for the network itself. [`Network::SwarmMain`] is
+    /// necessarily absent, because it cannot be built without a genesis hash and three funding
+    /// stream recipients, so there is no value to put here.
     // TODO: Change `Nu6_2` to `Nu7` after NU7 activation.
     // TODO: Move the value here to a field on `testnet::Parameters` (#8367)
     pub static ref INITIAL_MIN_NETWORK_PROTOCOL_VERSION: HashMap<NetworkKind, Version> = {

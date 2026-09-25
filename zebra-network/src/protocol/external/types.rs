@@ -55,10 +55,24 @@ impl Version {
     /// - during the initial block download,
     /// - after Zebra restarts, and
     /// - after Zebra's local network is slow or shut down.
+    /// # Correctness
+    ///
+    /// The lookup table is a cache of the three upstream answers, not the source of truth. A
+    /// network that is not in it falls through to the value the network itself implies, so a
+    /// newly added [`Network`] variant cannot make this function panic. It used to be an
+    /// infallible `.get(..).expect(..)`, and [`Network::SwarmMain`] was missing from the table,
+    /// which aborted `zebrad` during peer-set initialization before the RPC server started.
     fn initial_min_for_network(network: &Network) -> Version {
-        *constants::INITIAL_MIN_NETWORK_PROTOCOL_VERSION
-            .get(&network.kind())
-            .expect("We always have a value for testnet or mainnet")
+        if let Some(version) = constants::INITIAL_MIN_NETWORK_PROTOCOL_VERSION.get(&network.kind())
+        {
+            return *version;
+        }
+
+        // The fallback is the same expression the table's own entries are built from, evaluated
+        // for this network instead of for one of the three it happens to list. On SwarmMain that
+        // is `CURRENT_NETWORK_PROTOCOL_VERSION`, because SWARM production starts at the NU6.3
+        // rules and has no legacy peer to stay compatible with.
+        Version::min_specified_for_upgrade(network, Nu6_2)
     }
 
     /// Returns the minimum specified network protocol version for `network` and
@@ -268,5 +282,126 @@ mod test {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod swarm_main_tests {
+    use std::sync::Arc;
+
+    use zebra_chain::{
+        block::Height,
+        parameters::{
+            network::swarm_main::{self, fixture},
+            Network, NetworkKind, NetworkUpgrade,
+        },
+    };
+
+    use super::*;
+    use crate::{constants::CURRENT_NETWORK_PROTOCOL_VERSION, Config};
+
+    /// The disposable genesis hash the 2026-09-25 production-domain rehearsal generated.
+    ///
+    /// It is a fixture here for the same reason it was disposable there: a network definition
+    /// that is pinned by hash has to be exercised with a hash, and this one is public, belongs to
+    /// no live chain and is not a candidate for the launch ceremony's.
+    const REHEARSAL_GENESIS: &str =
+        "007e6673cb1f970523cc60927a2fca00876c67bbeef6b3843230fd8f7546ce65";
+
+    /// A validated `Network::SwarmMain` with the rehearsal genesis and the three `s3…` fixture
+    /// funding stream recipients.
+    fn rehearsal_swarm_main() -> Network {
+        let params = fixture::builder()
+            .with_genesis_hash(REHEARSAL_GENESIS.parse().expect("rehearsal genesis parses"))
+            .finish()
+            .expect("the fixture profile is complete");
+
+        Network::SwarmMain(Arc::new(params))
+    }
+
+    /// Every network-keyed lookup a starting node makes must answer on SwarmMain, with a
+    /// SWARM-specific value and without panicking.
+    ///
+    /// `zebrad` at `8ff13f817` aborted during peer-set initialization on SwarmMain, because
+    /// `Version::initial_min_for_network` indexed a three-entry table infallibly. There was no
+    /// test that constructed a SwarmMain network and called it; this is that test, extended to
+    /// the rest of the lookups the same startup path makes.
+    #[test]
+    fn swarm_main_network_lookups_do_not_panic() {
+        let _init_guard = zebra_test::init();
+
+        let network = rehearsal_swarm_main();
+
+        assert_eq!(network.kind(), NetworkKind::SwarmMainnet);
+        assert!(
+            !network.is_a_test_network(),
+            "SWARM production must not be treated as a test network"
+        );
+
+        // 1. The lookup that panicked, and the two callers above it.
+        assert_eq!(
+            Version::initial_min_for_network(&network),
+            CURRENT_NETWORK_PROTOCOL_VERSION,
+            "SWARM production starts at the NU6.3 rules, so its peer floor is the current version"
+        );
+        for height in [0, 1, 2, 100, 35_001, 1_680_001] {
+            let height = Height(height);
+            let min_remote = Version::min_remote_for_height(&network, height);
+            assert!(
+                min_remote >= Version::min_specified_for_height(&network, height),
+                "the remote floor is never below the specified floor at {height:?}"
+            );
+            assert!(min_remote <= CURRENT_NETWORK_PROTOCOL_VERSION);
+        }
+        assert_eq!(
+            Version::min_remote_for_height(&network, Height(1)),
+            CURRENT_NETWORK_PROTOCOL_VERSION
+        );
+
+        // 2. Every network upgrade, not only the ones in the activation list.
+        for upgrade in NetworkUpgrade::iter() {
+            let _version = Version::min_specified_for_upgrade(&network, upgrade);
+        }
+        assert_eq!(
+            Version::min_specified_for_upgrade(&network, NetworkUpgrade::Nu6_3),
+            CURRENT_NETWORK_PROTOCOL_VERSION
+        );
+
+        // 3. Seeds: SWARM must not inherit either upstream DNS seeder list.
+        let config = Config {
+            network: network.clone(),
+            ..Config::default()
+        };
+        assert!(
+            config.initial_peer_hostnames().is_empty(),
+            "a SWARM node must not dial the Zcash DNS seeders"
+        );
+
+        // 4. Ports and magic.
+        assert_eq!(network.default_port(), swarm_main::DEFAULT_P2P_PORT);
+        assert_eq!(network.default_port(), 28233);
+        assert_eq!(network.magic(), swarm_main::MAGIC);
+        assert_ne!(network.magic(), Network::Mainnet.magic());
+        assert_ne!(network.magic(), Network::new_default_testnet().magic());
+
+        // 5. Checkpoints: the genesis checkpoint is the whole list, and it is SWARM's genesis.
+        let checkpoints = network.checkpoint_list();
+        assert_eq!(checkpoints.max_height(), Height(0));
+        assert_eq!(
+            checkpoints.hash(Height(0)),
+            Some(network.genesis_hash()),
+            "the only checkpoint must be the configured SWARM genesis"
+        );
+        assert_ne!(network.genesis_hash(), Network::Mainnet.genesis_hash());
+
+        // 6. The state database namespace, which is `Network::lowercase_name()`.
+        assert_eq!(network.lowercase_name(), "swarmmainnet");
+        assert_ne!(network.lowercase_name(), Network::Mainnet.lowercase_name());
+
+        // 7. The RPC `chain` field, which is `Network::bip70_network_name()`.
+        assert_eq!(network.bip70_network_name(), swarm_main::CHAIN_LABEL);
+        assert_eq!(network.chain_label(), "swarm-mainnet");
+        assert_ne!(network.bip70_network_name(), "main");
+        assert_ne!(network.bip70_network_name(), "test");
     }
 }

@@ -62,11 +62,21 @@ pub fn validate_address(
         return Ok(ValidateAddressResponse::invalid());
     }
 
-    // Testnet & regtest share format; only mainnet differs.
-    let addr_is_mainnet = matches!(address.network(), NetworkKind::Mainnet);
-    let net_is_mainnet = network.kind() == NetworkKind::Mainnet;
+    // Testnet and Regtest share a transparent address format, so Regtest collapses to Testnet.
+    // Every other kind is compared for equality.
+    //
+    // # Correctness
+    //
+    // This used to compare two booleans ("is the address Mainnet?" against "is the node on
+    // Mainnet?"), which is only a valid test while exactly two answers exist. With
+    // `NetworkKind::SwarmMainnet` it silently accepted a Zcash Testnet address on a SWARM
+    // production node and a SWARM address on a Zcash Testnet node, because neither is Mainnet.
+    let expected_kind = match network.kind() {
+        NetworkKind::Regtest => NetworkKind::Testnet,
+        kind => kind,
+    };
 
-    if addr_is_mainnet != net_is_mainnet {
+    if address.network() != expected_kind {
         tracing::info!(
             ?network,
             address_network = ?address.network(),

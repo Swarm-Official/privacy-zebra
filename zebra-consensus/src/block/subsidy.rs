@@ -27,6 +27,18 @@ fn funding_stream_address_index(
     let funding_streams = network.funding_streams(height)?;
     let num_addresses = funding_streams.recipient(receiver)?.addresses().len();
 
+    // # Correctness
+    //
+    // SWARM production configures exactly one destination per recipient, fixed for the whole
+    // funding stream range (`SwarmMainParametersBuilder::finish` rejects anything else), so there
+    // is no address rotation to compute. The upstream formula below assumes the 48 rotating
+    // addresses ZIP-214 gives each Zcash recipient, and its `assert!` would abort the node at the
+    // first SWARM address period boundary — `post_blossom_halving_interval / 48` = height 35_001 —
+    // where it would compute index 1 into a one-element slice. Upstream networks are unaffected.
+    if network.is_swarm_main() {
+        return Some(0);
+    }
+
     let index = 1u32
         .checked_add(funding_stream_address_period(height, network))?
         .checked_sub(funding_stream_address_period(

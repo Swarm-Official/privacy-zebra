@@ -137,14 +137,27 @@ pub enum MinerAddressType {
     Transparent,
 }
 
-/// Returns the hard-coded default miner address string for a given network and address type.
+/// Returns the hard-coded default miner address string for a given network and address type,
+/// or `None` when the network has no hard-coded default.
 ///
 /// All addresses come from a single address:
 ///
 /// - addresses for different networks are only different encodings of the same address;
 /// - addresses of different types are components of the same unified address.
-pub fn default_miner_address(kind: NetworkKind, addr_type: &MinerAddressType) -> &'static str {
-    MINER_ADDRESS[&kind][addr_type]
+///
+/// # Correctness
+///
+/// [`NetworkKind::SwarmMainnet`] has no entry and returns `None`. There is deliberately no
+/// built-in SWARM production payout address: the only addresses that could be put here are
+/// re-encodings of an upstream test vector whose key is public, so a node that silently used one
+/// would mine SWARM blocks to a destination anybody can spend. The operator must configure
+/// `mining.miner_address`. This used to be an infallible `MINER_ADDRESS[&kind][addr_type]`, which
+/// panicked on SwarmMain.
+pub fn default_miner_address(
+    kind: NetworkKind,
+    addr_type: &MinerAddressType,
+) -> Option<&'static str> {
+    MINER_ADDRESS.get(&kind)?.get(addr_type).copied()
 }
 
 #[cfg(test)]
@@ -153,7 +166,8 @@ mod swarm_prefix_tests {
 
     #[test]
     fn swarm_and_legacy_miner_addresses_have_identical_receivers() {
-        let legacy = default_miner_address(NetworkKind::Testnet, &MinerAddressType::Unified);
+        let legacy = default_miner_address(NetworkKind::Testnet, &MinerAddressType::Unified)
+            .expect("Testnet has a hard-coded default miner address");
         let parsed: ZcashAddress = legacy.parse().expect("the built-in test vector is valid");
         let canonical = parsed.to_string();
         assert!(canonical.starts_with("swarm1"));
@@ -162,6 +176,21 @@ mod swarm_prefix_tests {
             .replacen("swarm", "SwarM", 1)
             .parse::<ZcashAddress>()
             .is_err());
+    }
+
+    #[test]
+    fn swarm_main_has_no_hard_coded_miner_address() {
+        for addr_type in [
+            MinerAddressType::Unified,
+            MinerAddressType::Sapling,
+            MinerAddressType::Transparent,
+        ] {
+            assert_eq!(
+                default_miner_address(NetworkKind::SwarmMainnet, &addr_type),
+                None,
+                "SWARM production must not fall back to an upstream test-vector payout address"
+            );
+        }
     }
 }
 
