@@ -623,10 +623,27 @@ mod tests {
         let script = redeem_script(1, &pubkeys).unwrap();
         let address = p2sh_testnet_address(&script);
 
-        write_key_file(&path, "swarm-test", 1, &address, &script, &secrets, &pubkeys)
-            .expect("first write succeeds");
-        let second =
-            write_key_file(&path, "swarm-test", 1, &address, &script, &secrets, &pubkeys);
+        write_key_file(
+            &path,
+            "swarm-test",
+            NetworkKind::Testnet,
+            1,
+            &address,
+            &script,
+            &secrets,
+            &pubkeys,
+        )
+        .expect("first write succeeds");
+        let second = write_key_file(
+            &path,
+            "swarm-test",
+            NetworkKind::Testnet,
+            1,
+            &address,
+            &script,
+            &secrets,
+            &pubkeys,
+        );
         assert!(second.is_err(), "an existing key file must not be replaced");
 
         let written = std::fs::read_to_string(&path).unwrap();
@@ -647,7 +664,10 @@ mod tests {
         assert!(printed.contains(&hex::encode(pubkeys[0])));
         assert!(printed.contains("threshold      1 of 1"));
         let secret = hex::encode(secrets[0].secret_bytes());
-        assert!(!printed.contains(&secret), "the summary leaked a private key");
+        assert!(
+            !printed.contains(&secret),
+            "the summary leaked a private key"
+        );
         assert!(!printed.contains("secret"), "the summary mentions a secret");
     }
 
