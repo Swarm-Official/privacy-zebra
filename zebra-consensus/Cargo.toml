@@ -89,6 +89,9 @@ hex = { workspace = true }
 num-integer = { workspace = true }
 proptest = { workspace = true }
 proptest-derive = { workspace = true }
+# Only used by `tests/swarm_treasury_shielded_spend.rs`, to sign the 2-of-3 P2SH treasury input
+# with the published fixture scalars. Pinned to the workspace version already in Cargo.lock.
+secp256k1 = { workspace = true }
 spandoc = { workspace = true }
 
 tokio = { workspace = true, features = ["full", "tracing", "test-util"] }
