@@ -178,7 +178,7 @@ fn test_funding_stream_ranges_dont_overlap() -> Result<(), Report> {
 fn swarm_main_funding_stream_addresses_resolve_at_every_height() -> Result<(), Report> {
     let _init_guard = zebra_test::init();
 
-    let network = zebra_chain::parameters::network::swarm_main::fixture::network();
+    let network = zebra_chain::parameters::swarm_main::fixture::network();
     let receivers = [
         FundingStreamReceiver::Ecc,
         FundingStreamReceiver::MajorGrants,
