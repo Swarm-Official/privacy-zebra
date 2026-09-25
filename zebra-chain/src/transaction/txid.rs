@@ -2,6 +2,7 @@
 //! from the transaction.
 
 use super::{Hash, Transaction};
+use crate::parameters::{ConsensusContext, DomainRegistry};
 use crate::serialization::{sha256d, ZcashSerialize};
 
 /// A Transaction ID builder. It computes the transaction ID by hashing
@@ -21,14 +22,34 @@ impl<'a> TxIdBuilder<'a> {
     }
 
     /// Compute the Transaction ID for the previously specified transaction.
+    ///
+    /// For V5 and V6 the context is derived from the domain the transaction stores, looked up in
+    /// the production `DomainRegistry::UPSTREAM` table. Returns `None` for a domain that table
+    /// does not admit, exactly as the previous derived-network-upgrade lookup did.
     pub(super) fn txid(self) -> Option<Hash> {
         match self.trans {
             Transaction::V1 { .. }
             | Transaction::V2 { .. }
             | Transaction::V3 { .. }
             | Transaction::V4 { .. } => self.txid_v1_to_v4(),
-            Transaction::V5 { .. } => self.txid_v5(),
-            Transaction::V6 { .. } => self.txid_v6(),
+            Transaction::V5 { .. } | Transaction::V6 { .. } => {
+                let ctx = DomainRegistry::UPSTREAM
+                    .context_for_branch(self.trans.consensus_branch_id()?)?;
+                self.txid_v5_v6(&ctx)
+            }
+        }
+    }
+
+    /// Compute the Transaction ID for the previously specified transaction in `ctx`.
+    ///
+    /// Returns `None` if the transaction does not belong to `ctx`'s domain.
+    pub(super) fn txid_in(self, ctx: &ConsensusContext) -> Option<Hash> {
+        match self.trans {
+            Transaction::V1 { .. }
+            | Transaction::V2 { .. }
+            | Transaction::V3 { .. }
+            | Transaction::V4 { .. } => self.txid_v1_to_v4(),
+            Transaction::V5 { .. } | Transaction::V6 { .. } => self.txid_v5_v6(ctx),
         }
     }
 
@@ -40,18 +61,16 @@ impl<'a> TxIdBuilder<'a> {
         Some(Hash(hash_writer.finish()))
     }
 
-    /// Compute the Transaction ID for a V5 transaction in the given network upgrade.
+    /// Compute the Transaction ID for a V5 or V6 transaction in the given consensus context.
     /// In this case it's the hash of a tree of hashes of specific parts of the
     /// transaction, as specified in ZIP-244 and ZIP-225.
-    fn txid_v5(self) -> Option<Hash> {
-        let nu = self.trans.network_upgrade()?;
-
+    ///
+    /// The domain in `ctx` is part of the ZIP-244 personalization, so two contexts that select the
+    /// same rules but different domains produce different transaction IDs.
+    fn txid_v5_v6(self, ctx: &ConsensusContext) -> Option<Hash> {
         // We compute v5 txid (from ZIP-244) using librustzcash.
-        Some(Hash(*self.trans.to_librustzcash(nu).ok()?.txid().as_ref()))
-    }
-
-    /// Passthrough to txid_v5 for V6 transactions.
-    fn txid_v6(self) -> Option<Hash> {
-        self.txid_v5()
+        Some(Hash(
+            *self.trans.to_librustzcash_in(ctx).ok()?.txid().as_ref(),
+        ))
     }
 }

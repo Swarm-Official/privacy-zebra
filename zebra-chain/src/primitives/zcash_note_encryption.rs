@@ -3,16 +3,32 @@
 
 use crate::{
     block::Height,
-    parameters::{Network, NetworkUpgrade},
+    parameters::{ConsensusContext, DomainRegistry, Network, NetworkUpgrade},
     transaction::Transaction,
 };
 
 /// Returns true if all Sapling, Orchard, or Ironwood outputs, if any, decrypt successfully
 /// with an all-zeroes outgoing viewing key.
+///
+/// The context is resolved from the production [`DomainRegistry::UPSTREAM`] table for `network`
+/// and `height`. Returns false when that height has no consensus branch ID, which is the same
+/// result the conversion returned before.
 pub fn decrypts_successfully(tx: &Transaction, network: &Network, height: Height) -> bool {
-    let nu = NetworkUpgrade::current(network, height);
+    let Some(ctx) = DomainRegistry::UPSTREAM.context_at(network, height) else {
+        return false;
+    };
 
-    let Ok(tx) = tx.to_librustzcash(nu) else {
+    decrypts_successfully_in(tx, &ctx)
+}
+
+/// Returns true if all Sapling, Orchard, or Ironwood outputs, if any, decrypt successfully
+/// with an all-zeroes outgoing viewing key, in `ctx`.
+///
+/// Returns false if the transaction does not belong to `ctx`'s domain.
+pub fn decrypts_successfully_in(tx: &Transaction, ctx: &ConsensusContext) -> bool {
+    let nu = ctx.rules();
+
+    let Ok(tx) = tx.to_librustzcash_in(ctx) else {
         return false;
     };
 

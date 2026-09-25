@@ -13,6 +13,7 @@
 //! `Network` and `block::Height`.
 
 pub mod checkpoint;
+mod consensus_context;
 pub mod constants;
 mod genesis;
 mod network;
@@ -22,6 +23,9 @@ mod transaction;
 #[cfg(any(test, feature = "proptest-impl"))]
 pub mod arbitrary;
 
+#[cfg(test)]
+pub(crate) use consensus_context::FIXTURE_NU6_3_DOMAIN;
+pub use consensus_context::{ConsensusContext, DomainRegistry};
 pub use genesis::*;
 pub use network::{magic::Magic, subsidy, testnet, Network, NetworkKind};
 pub use network_upgrade::*;

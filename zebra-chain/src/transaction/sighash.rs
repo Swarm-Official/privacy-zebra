@@ -7,7 +7,7 @@ use zcash_transparent::sighash::SighashType;
 
 use super::Transaction;
 
-use crate::parameters::NetworkUpgrade;
+use crate::parameters::{ConsensusContext, NetworkUpgrade};
 use crate::{transparent, Error};
 
 use crate::primitives::zcash_primitives::{sighash, sighash_v4_raw, PrecomputedTxData};
@@ -97,6 +97,23 @@ impl SigHasher {
     ) -> Result<Self, Error> {
         Ok(SigHasher {
             precomputed_tx_data: PrecomputedTxData::new(trans, nu, all_previous_outputs)?,
+        })
+    }
+
+    /// Create a new SigHasher for the given transaction in `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// - If `trans` does not belong to `ctx`'s domain, so a transaction signed for another domain
+    ///   cannot be replayed here even when that domain selects the same rules.
+    /// - If `trans` can't otherwise be converted to its `librustzcash` equivalent.
+    pub fn new_in(
+        trans: &Transaction,
+        ctx: &ConsensusContext,
+        all_previous_outputs: Arc<Vec<transparent::Output>>,
+    ) -> Result<Self, Error> {
+        Ok(SigHasher {
+            precomputed_tx_data: PrecomputedTxData::new_in(trans, ctx, all_previous_outputs)?,
         })
     }
 

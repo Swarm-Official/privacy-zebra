@@ -1550,3 +1550,229 @@ fn coinbase_v5_with_sapling_spends_deserializes_successfully() {
         "unexpected error: {err}"
     );
 }
+
+// P1b2: two-domain coverage.
+//
+// Upstream pairs each rule set with exactly one transaction domain, so "two domains, one rule
+// set" cannot be expressed with upstream values alone. The tests below cover it from two sides:
+// a `#[cfg(test)]` fixture domain for the registry and wire machinery, and the NU6/NU6.1 pair --
+// which deploy the same *transaction* rules and differ only in their consensus branch ID -- for
+// the digests, which are computed by the closed upstream library.
+
+/// A second, deliberately fake domain for the NU6.3 rules is admitted by the test registry only,
+/// travels through serialization byte for byte, and is rejected by every production path.
+///
+/// Covers: the fixture domain survives encoding verbatim (a); the wrong expected context is
+/// rejected even though the rules match (b); the production registry and the production wire
+/// decoder both reject the fixture domain (d).
+#[test]
+fn fixture_domain_is_a_second_nu6_3_domain_and_never_leaks_into_production() {
+    use crate::parameters::{DomainRegistry, FIXTURE_NU6_3_DOMAIN};
+
+    let _init_guard = zebra_test::init();
+
+    let upstream_ctx = DomainRegistry::UPSTREAM
+        .context_for_rules(NetworkUpgrade::Nu6_3)
+        .expect("NU6.3 has an upstream domain");
+    let fixture_ctx = DomainRegistry::FIXTURE
+        .context_for_branch(FIXTURE_NU6_3_DOMAIN)
+        .expect("the fixture registry admits the fixture domain");
+
+    // Same rules, different domain: exactly the case upstream cannot express.
+    assert_eq!(fixture_ctx.rules(), upstream_ctx.rules());
+    assert_ne!(fixture_ctx.branch(), upstream_ctx.branch());
+
+    // (d) The production registry does not admit the fixture domain, and neither does the
+    // pre-existing closed branch-to-upgrade lookup that guards production decoding.
+    assert!(!DomainRegistry::UPSTREAM.admits(FIXTURE_NU6_3_DOMAIN));
+    assert_eq!(
+        DomainRegistry::UPSTREAM.context_for_branch(FIXTURE_NU6_3_DOMAIN),
+        None
+    );
+    assert!(NetworkUpgrade::try_from(u32::from(FIXTURE_NU6_3_DOMAIN)).is_err());
+    // Producing a transaction under NU6.3 still selects the upstream domain, in both registries.
+    assert_eq!(
+        DomainRegistry::FIXTURE.context_for_rules(NetworkUpgrade::Nu6_3),
+        Some(upstream_ctx)
+    );
+
+    let upstream_tx = arbitrary::fake_v6_transaction(NetworkUpgrade::Nu6_3, None, None);
+    let mut fixture_tx = upstream_tx.clone();
+    match &mut fixture_tx {
+        Transaction::V6 {
+            consensus_branch_id,
+            ..
+        } => *consensus_branch_id = FIXTURE_NU6_3_DOMAIN,
+        _ => unreachable!("fake_v6_transaction builds a V6 transaction"),
+    }
+    assert_eq!(fixture_tx.consensus_branch_id(), Some(FIXTURE_NU6_3_DOMAIN));
+    // The fixture domain is not in the closed upstream table, so no upgrade is derived for it.
+    assert_eq!(fixture_tx.network_upgrade(), None);
+
+    // (a) Under the fixture registry the raw domain is written verbatim, and the two encodings
+    // differ in the four `nConsensusBranchId` bytes and nowhere else.
+    let upstream_bytes = upstream_tx
+        .zcash_serialize_to_vec()
+        .expect("upstream V6 fixture serializes");
+    let mut fixture_bytes = Vec::new();
+    fixture_tx
+        .zcash_serialize_in(&mut fixture_bytes, DomainRegistry::FIXTURE)
+        .expect("the fixture registry admits the fixture domain");
+    assert_eq!(
+        &fixture_bytes[8..12],
+        &u32::from(FIXTURE_NU6_3_DOMAIN).to_le_bytes(),
+        "the fake domain is written exactly as stored"
+    );
+    let mut patched = fixture_bytes.clone();
+    patched[8..12].copy_from_slice(&upstream_bytes[8..12]);
+    assert_eq!(
+        patched, upstream_bytes,
+        "the two domains encode identical transaction bodies"
+    );
+
+    // (d) Production encoding and production decoding both reject the fixture domain.
+    let error = fixture_tx
+        .zcash_serialize_to_vec()
+        .expect_err("the production registry rejects the fixture domain");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        fixture_bytes
+            .as_slice()
+            .zcash_deserialize_into::<Transaction>()
+            .is_err(),
+        "the production wire decoder rejects the fixture domain"
+    );
+
+    // Decoding under the fixture registry passes Zebra's domain gate, and then fails closed at
+    // the pre-existing librustzcash validation: `zcash_protocol::consensus::BranchId` is a closed
+    // enum and `zcash_primitives` matches it exhaustively, so no unadmitted u32 can reach the
+    // digest computation. Extending that would require patching the pinned `zcash_primitives`
+    // crate, which is deliberately out of scope for this refactor.
+    assert!(
+        Transaction::zcash_deserialize_in(fixture_bytes.as_slice(), DomainRegistry::FIXTURE)
+            .is_err(),
+        "the fixture domain still fails the librustzcash decode guard"
+    );
+
+    // (b) The wrong expected context is rejected in both directions, although the rules match.
+    assert!(matches!(
+        fixture_tx.to_librustzcash_in(&upstream_ctx),
+        Err(crate::Error::InvalidConsensusBranchId)
+    ));
+    assert!(matches!(
+        upstream_tx.to_librustzcash_in(&fixture_ctx),
+        Err(crate::Error::InvalidConsensusBranchId)
+    ));
+    assert_eq!(upstream_tx.hash_in(&fixture_ctx), None);
+    assert_eq!(upstream_tx.auth_digest_in(&fixture_ctx), None);
+    assert!(matches!(
+        PrecomputedTxData::new_in(&upstream_tx, &fixture_ctx, Arc::new(Vec::new())),
+        Err(crate::Error::InvalidConsensusBranchId)
+    ));
+    assert!(matches!(
+        SigHasher::new_in(&upstream_tx, &fixture_ctx, Arc::new(Vec::new())),
+        Err(crate::Error::InvalidConsensusBranchId)
+    ));
+
+    // The upstream transaction is untouched by any of this: in its own context it still produces
+    // the values the upgrade-only entry points produce.
+    assert_eq!(upstream_tx.hash_in(&upstream_ctx), Some(upstream_tx.hash()));
+    assert_eq!(
+        upstream_tx.auth_digest_in(&upstream_ctx),
+        upstream_tx.auth_digest()
+    );
+}
+
+/// Two domains selecting the same transaction rules produce different ZIP-244 digests.
+///
+/// NU6 and NU6.1 deploy the same transaction rules -- `zcash_primitives` selects v5 transactions
+/// and Orchard protocol revision `InsecureV1` for both -- and differ only in their consensus
+/// branch ID. The domain is part of the ZIP-244 personalization, so an identical transaction body
+/// has a different txid, authorizing data commitment and sighash under each.
+///
+/// This is the executed form of the same-rules/different-domain property that the fixture domain
+/// cannot demonstrate, because the closed upstream `BranchId` enum refuses fabricated IDs.
+#[test]
+fn same_rules_different_domain_changes_the_zip244_digests() {
+    use crate::parameters::DomainRegistry;
+
+    let _init_guard = zebra_test::init();
+
+    let nu6 = DomainRegistry::UPSTREAM
+        .context_for_rules(NetworkUpgrade::Nu6)
+        .expect("NU6 has a domain");
+    let nu6_1 = DomainRegistry::UPSTREAM
+        .context_for_rules(NetworkUpgrade::Nu6_1)
+        .expect("NU6.1 has a domain");
+    assert_ne!(nu6.branch(), nu6_1.branch());
+
+    let mut tx_nu6 = EMPTY_V5_TX.clone();
+    tx_nu6
+        .update_network_upgrade(NetworkUpgrade::Nu6)
+        .expect("NU6 has a branch ID");
+    let mut tx_nu6_1 = EMPTY_V5_TX.clone();
+    tx_nu6_1
+        .update_network_upgrade(NetworkUpgrade::Nu6_1)
+        .expect("NU6.1 has a branch ID");
+
+    // The encodings are identical apart from the four domain bytes.
+    let bytes_nu6 = tx_nu6.zcash_serialize_to_vec().expect("NU6 tx serializes");
+    let mut bytes_nu6_1 = tx_nu6_1
+        .zcash_serialize_to_vec()
+        .expect("NU6.1 tx serializes");
+    assert_ne!(bytes_nu6[8..12], bytes_nu6_1[8..12]);
+    bytes_nu6_1[8..12].copy_from_slice(&bytes_nu6[8..12]);
+    assert_eq!(bytes_nu6, bytes_nu6_1);
+
+    let txid_nu6 = tx_nu6.hash_in(&nu6).expect("NU6 tx hashes in its context");
+    let txid_nu6_1 = tx_nu6_1
+        .hash_in(&nu6_1)
+        .expect("NU6.1 tx hashes in its context");
+    assert_ne!(txid_nu6, txid_nu6_1, "the domain separates transaction IDs");
+
+    let auth_nu6 = tx_nu6.auth_digest_in(&nu6).expect("NU6 auth digest");
+    let auth_nu6_1 = tx_nu6_1.auth_digest_in(&nu6_1).expect("NU6.1 auth digest");
+    assert_ne!(
+        auth_nu6, auth_nu6_1,
+        "the domain separates authorizing data commitments"
+    );
+
+    let sighash_nu6 = tx_nu6
+        .sighash_in(&nu6, HashType::ALL, Arc::new(Vec::new()), None)
+        .expect("NU6 sighash");
+    let sighash_nu6_1 = tx_nu6_1
+        .sighash_in(&nu6_1, HashType::ALL, Arc::new(Vec::new()), None)
+        .expect("NU6.1 sighash");
+    assert_ne!(
+        sighash_nu6, sighash_nu6_1,
+        "the domain separates signature hashes"
+    );
+
+    // Each transaction still belongs only to its own domain.
+    assert_eq!(tx_nu6.hash_in(&nu6_1), None);
+    assert_eq!(tx_nu6_1.hash_in(&nu6), None);
+}
+
+/// The context-taking entry points agree with the upgrade-only ones on every existing input, so
+/// migrating a caller cannot change a result.
+#[test]
+fn context_and_upgrade_entry_points_agree() {
+    use crate::parameters::DomainRegistry;
+
+    let _init_guard = zebra_test::init();
+
+    for net in Network::iter() {
+        for tx in v5_transactions(net.block_iter()) {
+            let nu = tx
+                .network_upgrade()
+                .expect("v5 test vectors have a recognized domain");
+            let ctx = DomainRegistry::UPSTREAM
+                .context_for_rules(nu)
+                .expect("recognized rules have a domain");
+
+            assert_eq!(ctx.branch(), tx.consensus_branch_id().expect("v5 domain"));
+            assert_eq!(tx.hash_in(&ctx), Some(tx.hash()));
+            assert_eq!(tx.auth_digest_in(&ctx), tx.auth_digest());
+        }
+    }
+}

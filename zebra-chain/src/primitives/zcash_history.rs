@@ -14,7 +14,7 @@ pub use zcash_history::{V1, V2, V3};
 use crate::{
     block::{Block, ChainHistoryMmrRootHash},
     orchard,
-    parameters::{Network, NetworkUpgrade},
+    parameters::{ConsensusContext, DomainRegistry, Network, NetworkUpgrade},
     sapling,
 };
 
@@ -139,9 +139,32 @@ impl<V: Version> Tree<V> {
         peaks: &BTreeMap<u32, Entry>,
         extra: &BTreeMap<u32, Entry>,
     ) -> Result<Self, io::Error> {
-        let branch_id = network_upgrade
-            .branch_id()
+        let ctx = DomainRegistry::UPSTREAM
+            .context_for_rules(network_upgrade)
             .expect("unexpected pre-Overwinter MMR history tree");
+
+        Self::new_from_cache_in(network, &ctx, length, peaks, extra)
+    }
+
+    /// Create a MMR tree with the given length from the given cache of nodes, in `ctx`.
+    ///
+    /// The ZIP-221 history nodes are domain-separated by the same consensus branch ID that
+    /// transactions commit to, so the history domain is resolved through the same registry as the
+    /// transaction domain and the two can never drift apart.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if `peaks` is empty.
+    #[allow(clippy::unwrap_in_result)]
+    pub fn new_from_cache_in(
+        network: &Network,
+        ctx: &ConsensusContext,
+        length: u32,
+        peaks: &BTreeMap<u32, Entry>,
+        extra: &BTreeMap<u32, Entry>,
+    ) -> Result<Self, io::Error> {
+        let branch_id = ctx.branch();
+        let network_upgrade = ctx.rules();
         let mut peaks_vec = Vec::new();
         for (idx, entry) in peaks {
             let inner_entry = zcash_history::Entry::from_bytes(branch_id.into(), entry.inner)?;
@@ -260,10 +283,13 @@ impl Version for zcash_history::V1 {
         let height = block
             .coinbase_height()
             .expect("block must have coinbase height during contextual verification");
-        let network_upgrade = NetworkUpgrade::current(network, height);
-        let branch_id = network_upgrade
-            .branch_id()
+        // This trait method's signature is fixed by `zcash_history`, so the context is resolved
+        // here from the network and height through the production registry rather than passed in.
+        let ctx = DomainRegistry::UPSTREAM
+            .context_at(network, height)
             .expect("must have branch ID for chain history network upgrades");
+        let network_upgrade = ctx.rules();
+        let branch_id = ctx.branch();
         let block_hash = block.hash().0;
         let time: u32 = block
             .header

@@ -42,8 +42,8 @@ use crate::{
     amount::{Amount, Error as AmountError, NegativeAllowed, NonNegative},
     block, ironwood, orchard,
     parameters::{
-        ConsensusBranchId, Network, NetworkUpgrade, OVERWINTER_VERSION_GROUP_ID,
-        SAPLING_VERSION_GROUP_ID, TX_V5_VERSION_GROUP_ID,
+        ConsensusBranchId, ConsensusContext, DomainRegistry, Network, NetworkUpgrade,
+        OVERWINTER_VERSION_GROUP_ID, SAPLING_VERSION_GROUP_ID, TX_V5_VERSION_GROUP_ID,
     },
     primitives::{ed25519, Bctv14Proof, Groth16Proof},
     sapling,
@@ -241,6 +241,15 @@ impl Transaction {
         Hash::from(self)
     }
 
+    /// Compute the hash (mined transaction ID) of this transaction in `ctx`.
+    ///
+    /// Returns `None` if this V5/V6 transaction does not belong to `ctx`'s domain. The domain is
+    /// part of the ZIP-244 personalization, so the same transaction body under two domains that
+    /// select the same rules has two different IDs.
+    pub fn hash_in(&self, ctx: &ConsensusContext) -> Option<Hash> {
+        txid::TxIdBuilder::new(self).txid_in(ctx)
+    }
+
     /// Compute the unmined transaction ID of this transaction.
     ///
     /// This ID uniquely identifies unmined transactions,
@@ -285,6 +294,22 @@ impl Transaction {
             .sighash(hash_type, input_index_script_code))
     }
 
+    /// Calculate the sighash for the current transaction in `ctx`.
+    ///
+    /// Like [`Transaction::sighash`], but the rules and the transaction domain are both taken
+    /// from `ctx`, so a transaction belonging to another domain is rejected with
+    /// [`Error::InvalidConsensusBranchId`] even when that domain selects the same rules.
+    pub fn sighash_in(
+        &self,
+        ctx: &ConsensusContext,
+        hash_type: sighash::HashType,
+        all_previous_outputs: Arc<Vec<transparent::Output>>,
+        input_index_script_code: Option<(usize, Vec<u8>)>,
+    ) -> Result<SigHash, Error> {
+        Ok(sighash::SigHasher::new_in(self, ctx, all_previous_outputs)?
+            .sighash(hash_type, input_index_script_code))
+    }
+
     /// Return a [`SigHasher`] for this transaction.
     pub fn sighasher(
         &self,
@@ -292,6 +317,15 @@ impl Transaction {
         all_previous_outputs: Arc<Vec<transparent::Output>>,
     ) -> Result<sighash::SigHasher, Error> {
         sighash::SigHasher::new(self, nu, all_previous_outputs)
+    }
+
+    /// Return a [`SigHasher`] for this transaction in `ctx`.
+    pub fn sighasher_in(
+        &self,
+        ctx: &ConsensusContext,
+        all_previous_outputs: Arc<Vec<transparent::Output>>,
+    ) -> Result<sighash::SigHasher, Error> {
+        sighash::SigHasher::new_in(self, ctx, all_previous_outputs)
     }
 
     /// Compute the authorizing data commitment of this transaction as specified
@@ -308,6 +342,25 @@ impl Transaction {
             | Transaction::V4 { .. } => None,
             Transaction::V5 { .. } => Some(AuthDigest::from(self)),
             Transaction::V6 { .. } => Some(AuthDigest::from(self)),
+        }
+    }
+
+    /// Compute the authorizing data commitment of this transaction in `ctx`, as specified in
+    /// [ZIP-244].
+    ///
+    /// Returns `None` for pre-v5 transactions, and for a V5/V6 transaction that does not belong
+    /// to `ctx`'s domain.
+    ///
+    /// [ZIP-244]: https://zips.z.cash/zip-0244.
+    pub fn auth_digest_in(&self, ctx: &ConsensusContext) -> Option<AuthDigest> {
+        match self {
+            Transaction::V1 { .. }
+            | Transaction::V2 { .. }
+            | Transaction::V3 { .. }
+            | Transaction::V4 { .. } => None,
+            Transaction::V5 { .. } | Transaction::V6 { .. } => {
+                crate::primitives::zcash_primitives::auth_digest_in(self, ctx)
+            }
         }
     }
 
@@ -1613,24 +1666,27 @@ impl Transaction {
         self.value_balance_from_outputs(&outputs)
     }
 
-    /// Converts [`Transaction`] to [`zcash_primitives::transaction::Transaction`].
+    /// Converts [`Transaction`] to [`zcash_primitives::transaction::Transaction`] in `ctx`.
     ///
-    /// For V5/V6, the stored branch ID must equal the ID expected from `nu`.
-    /// The branch ID must also be recognized by the protocol reader.
-    pub(crate) fn to_librustzcash(
+    /// `ctx` carries both halves of the decision: the consensus rules in force and the
+    /// transaction domain expected at this point in the chain.
+    ///
+    /// For V5/V6 the stored raw `nConsensusBranchId` must equal `ctx.branch()`; a transaction that
+    /// belongs to another domain is rejected even when that domain selects the same rules. V1-V4
+    /// carry no domain on the wire, so they take theirs from `ctx`, which is derived from the
+    /// network and height and never guessed from the serialized data.
+    ///
+    /// The domain must also be one the protocol reader recognizes.
+    pub(crate) fn to_librustzcash_in(
         &self,
-        nu: NetworkUpgrade,
+        ctx: &ConsensusContext,
     ) -> Result<zcash_primitives::transaction::Transaction, crate::Error> {
-        let Some(expected_branch_id) = nu.branch_id() else {
-            return Err(crate::Error::InvalidConsensusBranchId);
-        };
-
         let branch_id = match self.consensus_branch_id() {
-            Some(actual_branch_id) if actual_branch_id != expected_branch_id => {
+            Some(actual_branch_id) if actual_branch_id != ctx.branch() => {
                 return Err(crate::Error::InvalidConsensusBranchId);
             }
             Some(actual_branch_id) => actual_branch_id,
-            None => expected_branch_id,
+            None => ctx.branch(),
         };
 
         let Ok(branch_id) = consensus::BranchId::try_from(branch_id) else {
@@ -1641,6 +1697,27 @@ impl Transaction {
             &self.zcash_serialize_to_vec()?[..],
             branch_id,
         )?)
+    }
+
+    /// Converts [`Transaction`] to [`zcash_primitives::transaction::Transaction`] under `nu`.
+    ///
+    /// This is [`Transaction::to_librustzcash_in`] with the context derived from the production
+    /// [`DomainRegistry::UPSTREAM`] table, which is a bijection, so `nu` still names exactly one
+    /// domain.
+    ///
+    /// Every production caller now passes a context, so this upgrade-only form is retained for
+    /// the existing tests, which exercise it unchanged. Gating it on `test` is what proves the
+    /// production tree is fully migrated: if a non-test caller reappeared, it would not compile.
+    #[cfg(test)]
+    pub(crate) fn to_librustzcash(
+        &self,
+        nu: NetworkUpgrade,
+    ) -> Result<zcash_primitives::transaction::Transaction, crate::Error> {
+        let Some(ctx) = DomainRegistry::UPSTREAM.context_for_rules(nu) else {
+            return Err(crate::Error::InvalidConsensusBranchId);
+        };
+
+        self.to_librustzcash_in(&ctx)
     }
 
     // Common Sapling & Orchard Properties

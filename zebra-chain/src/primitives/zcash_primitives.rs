@@ -9,7 +9,7 @@ use zcash_script::script;
 
 use crate::{
     amount::{Amount, NonNegative},
-    parameters::NetworkUpgrade,
+    parameters::{ConsensusContext, DomainRegistry, NetworkUpgrade},
     serialization::ZcashSerialize,
     transaction::{AuthDigest, HashType, SigHash, Transaction},
     transparent::{self, Script},
@@ -241,11 +241,10 @@ impl PrecomputedTxData {
     /// # Notes
     ///
     /// The check that ensures compliance with the two consensus rules stated above takes place in
-    /// the [`Transaction::to_librustzcash`] method. If the check fails, the tx can't be converted
-    /// to its `librustzcash` equivalent, which leads to an error. The check relies on the passed
-    /// `nu` parameter, which uniquely represents a consensus branch id and can, therefore, be used
-    /// as an equivalent to a consensus branch id. The desired `nu` is set either by the script or
-    /// tx verifier in `zebra-consensus`.
+    /// the [`Transaction::to_librustzcash_in`] method. If the check fails, the tx can't be
+    /// converted to its `librustzcash` equivalent, which leads to an error. The check compares the
+    /// transaction's stored domain against the domain the production registry pairs with `nu`. The
+    /// desired `nu` is set either by the script or tx verifier in `zebra-consensus`.
     ///
     /// [ZIP-252]: <https://zips.z.cash/zip-0252>
     /// [ZIP-253]: <https://zips.z.cash/zip-0253>
@@ -254,7 +253,33 @@ impl PrecomputedTxData {
         nu: NetworkUpgrade,
         all_previous_outputs: Arc<Vec<transparent::Output>>,
     ) -> Result<PrecomputedTxData, Error> {
-        let tx = tx.to_librustzcash(nu)?;
+        let ctx = DomainRegistry::UPSTREAM
+            .context_for_rules(nu)
+            .ok_or(Error::InvalidConsensusBranchId)?;
+
+        Self::new_in(tx, &ctx, all_previous_outputs)
+    }
+
+    /// Computes the data used for sighash or txid computation in `ctx`.
+    ///
+    /// # Inputs
+    ///
+    /// - `tx`: the relevant transaction.
+    /// - `ctx`: the consensus rules in force and the transaction domain expected for this
+    ///   transaction, as resolved by a [`DomainRegistry`].
+    /// - `all_previous_outputs`: the transparent Output matching each transparent input in `tx`.
+    ///
+    /// # Errors
+    ///
+    /// - If `tx` does not belong to `ctx`'s domain. This is the two-way replay check: a
+    ///   transaction from another domain is rejected even when that domain selects the same rules.
+    /// - If `tx` can't otherwise be converted to its `librustzcash` equivalent.
+    pub(crate) fn new_in(
+        tx: &Transaction,
+        ctx: &ConsensusContext,
+        all_previous_outputs: Arc<Vec<transparent::Output>>,
+    ) -> Result<PrecomputedTxData, Error> {
+        let tx = tx.to_librustzcash_in(ctx)?;
 
         let txid_parts = tx.deref().digest(zp_tx::txid::TxIdDigester);
 
@@ -523,14 +548,28 @@ fn sighash_inner(
 ///
 /// [ZIP-244]: https://zips.z.cash/zip-0244
 pub(crate) fn auth_digest(tx: &Transaction) -> AuthDigest {
-    let nu = tx.network_upgrade().expect("V5 tx has a network upgrade");
+    let ctx = tx
+        .consensus_branch_id()
+        .and_then(|branch| DomainRegistry::UPSTREAM.context_for_branch(branch))
+        .expect("V5 tx has a network upgrade");
 
-    AuthDigest(
-        tx.to_librustzcash(nu)
-            .expect("V5 tx is convertible to its `zcash_params` equivalent")
+    auth_digest_in(tx, &ctx).expect("V5 tx is convertible to its `zcash_params` equivalent")
+}
+
+/// Compute the authorizing data commitment of this transaction in `ctx`, as specified in
+/// [ZIP-244].
+///
+/// Returns `None` if the transaction does not belong to `ctx`'s domain, or is otherwise not
+/// convertible to its `librustzcash` equivalent.
+///
+/// [ZIP-244]: https://zips.z.cash/zip-0244
+pub(crate) fn auth_digest_in(tx: &Transaction, ctx: &ConsensusContext) -> Option<AuthDigest> {
+    Some(AuthDigest(
+        tx.to_librustzcash_in(ctx)
+            .ok()?
             .auth_commitment()
             .as_ref()
             .try_into()
             .expect("digest has the correct size"),
-    )
+    ))
 }

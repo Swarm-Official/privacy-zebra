@@ -587,11 +587,33 @@ impl<T: reddsa::SigType> ZcashDeserialize for reddsa::Signature<T> {
 }
 
 impl ZcashSerialize for Transaction {
+    /// Serializes this transaction, admitting only the production transaction domains.
+    ///
+    /// # Correctness
+    ///
+    /// This is the only serialization entry point reachable from production code, and it is
+    /// pinned to [`DomainRegistry::UPSTREAM`], so no domain outside the closed upstream table can
+    /// ever be written to the wire by a production build.
+    fn zcash_serialize<W: io::Write>(&self, writer: W) -> Result<(), io::Error> {
+        self.zcash_serialize_in(writer, DomainRegistry::UPSTREAM)
+    }
+}
+
+impl Transaction {
+    /// Serializes this transaction, admitting the transaction domains in `registry`.
+    ///
+    /// The registry only decides which raw `nConsensusBranchId` values may be written; it never
+    /// supplies one. A V5/V6 transaction's stored raw domain is always written verbatim and is
+    /// never regenerated from a rule.
     #[allow(clippy::unwrap_in_result)]
-    fn zcash_serialize<W: io::Write>(&self, mut writer: W) -> Result<(), io::Error> {
+    pub(crate) fn zcash_serialize_in<W: io::Write>(
+        &self,
+        mut writer: W,
+        registry: &DomainRegistry,
+    ) -> Result<(), io::Error> {
         // Reject unknown domains before writing even the transaction header.
         if let Some(branch_id) = self.consensus_branch_id() {
-            if NetworkUpgrade::try_from(u32::from(branch_id)).is_err() {
+            if !registry.admits(branch_id) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "unknown consensus branch ID",
@@ -856,8 +878,28 @@ impl ZcashSerialize for Transaction {
 }
 
 impl ZcashDeserialize for Transaction {
-    #[allow(clippy::unwrap_in_result)]
+    /// Deserializes a transaction, admitting only the production transaction domains.
+    ///
+    /// # Correctness
+    ///
+    /// This is the only deserialization entry point reachable from production code, and it is
+    /// pinned to [`DomainRegistry::UPSTREAM`], so a transaction whose wire domain is outside the
+    /// closed upstream table is rejected by every production build.
     fn zcash_deserialize<R: io::Read>(reader: R) -> Result<Self, SerializationError> {
+        Transaction::zcash_deserialize_in(reader, DomainRegistry::UPSTREAM)
+    }
+}
+
+impl Transaction {
+    /// Deserializes a transaction, admitting the transaction domains in `registry`.
+    ///
+    /// The raw `nConsensusBranchId` read from the wire is retained byte for byte; `registry` only
+    /// decides whether it is admitted, and which consensus rules it selects.
+    #[allow(clippy::unwrap_in_result)]
+    pub(crate) fn zcash_deserialize_in<R: io::Read>(
+        reader: R,
+        registry: &DomainRegistry,
+    ) -> Result<Self, SerializationError> {
         // # Consensus
         //
         // > [Pre-Sapling] The encoded size of the transaction MUST be less than or
@@ -1086,7 +1128,14 @@ impl ZcashDeserialize for Transaction {
                 // Denoted as `nConsensusBranchId` in the spec.
                 let consensus_branch_id =
                     ConsensusBranchId::from(limited_reader.read_u32::<LittleEndian>()?);
-                let network_upgrade = NetworkUpgrade::try_from(u32::from(consensus_branch_id))?;
+                // Resolve the rules through the recognized-domain registry. For the production
+                // registry this is exactly `NetworkUpgrade::try_from(raw)`, including its
+                // `InvalidConsensusBranchId` error; an unadmitted domain fails here, and no rules
+                // are ever guessed for one.
+                let ctx = registry
+                    .context_for_branch(consensus_branch_id)
+                    .ok_or(crate::Error::InvalidConsensusBranchId)?;
+                let network_upgrade = ctx.rules();
 
                 // # Consensus
                 //
@@ -1137,7 +1186,7 @@ impl ZcashDeserialize for Transaction {
                     orchard_shielded_data,
                 };
 
-                tx.to_librustzcash(network_upgrade)?;
+                tx.to_librustzcash_in(&ctx)?;
 
                 Ok(tx)
             }
@@ -1150,7 +1199,14 @@ impl ZcashDeserialize for Transaction {
                 // Denoted as `nConsensusBranchId` in the spec.
                 let consensus_branch_id =
                     ConsensusBranchId::from(limited_reader.read_u32::<LittleEndian>()?);
-                let network_upgrade = NetworkUpgrade::try_from(u32::from(consensus_branch_id))?;
+                // Resolve the rules through the recognized-domain registry. For the production
+                // registry this is exactly `NetworkUpgrade::try_from(raw)`, including its
+                // `InvalidConsensusBranchId` error; an unadmitted domain fails here, and no rules
+                // are ever guessed for one.
+                let ctx = registry
+                    .context_for_branch(consensus_branch_id)
+                    .ok_or(crate::Error::InvalidConsensusBranchId)?;
+                let network_upgrade = ctx.rules();
                 // v6 transactions are only valid from NU6.3 onward, so reject transactions with
                 // pre-NU6.3 consensus branch IDs at the wire layer. (The exact tx-vs-block network
                 // upgrade match is also re-checked during verification by `consensus_branch_id`.)
@@ -1215,7 +1271,7 @@ impl ZcashDeserialize for Transaction {
                 // fails closed at the wire layer for any divergence, ensuring an incompatibility can
                 // never reach the `expect(...)` in the txid/auth-digest path (`Hash::from`), which
                 // would otherwise abort the node on attacker-supplied input.
-                tx.to_librustzcash(network_upgrade)?;
+                tx.to_librustzcash_in(&ctx)?;
 
                 Ok(tx)
             }
