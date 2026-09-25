@@ -1,0 +1,12 @@
+# Applies only to builds of this vendored crate on its own, i.e. when cargo is run
+# from this directory, or from the repository root with:
+#
+#   cargo test --locked --manifest-path vendor/zcash_address/Cargo.toml \
+#       --config vendor/zcash_address/.cargo/config.toml
+#
+# Without it, a standalone build resolves `zcash_protocol` from crates.io and would
+# silently test against the upstream constants (`utest`, and no `swarm_mainnet`
+# module) instead of the vendored SWARM ones. The node workspace applies the same
+# patch from its own root manifest, so this only reproduces that resolution.
+[patch.crates-io]
+zcash_protocol = { path = "../zcash_protocol" }

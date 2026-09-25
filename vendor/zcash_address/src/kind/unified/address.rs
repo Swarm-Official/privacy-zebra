@@ -155,6 +155,11 @@ impl super::private::SealedContainer for Address {
     /// The HRP for a Bech32m-encoded regtest Unified Address.
     const REGTEST: &'static str = constants::regtest::HRP_UNIFIED_ADDRESS;
 
+    /// The HRP for a Bech32m-encoded SWARM production Unified Address.
+    ///
+    /// PROVISIONAL root, see `zcash_protocol::constants::swarm_mainnet::HRP_ROOT`.
+    const SWARM_MAINNET: &'static str = constants::swarm_mainnet::HRP_UNIFIED_ADDRESS;
+
     fn from_inner(receivers: Vec<Self::Item>) -> Self {
         Self(receivers)
     }
@@ -275,7 +280,12 @@ mod tests {
     proptest! {
         #[test]
         fn ua_roundtrip(
-            network in select(vec![NetworkType::Main, NetworkType::Test, NetworkType::Regtest]),
+            network in select(vec![
+                NetworkType::Main,
+                NetworkType::Test,
+                NetworkType::Regtest,
+                NetworkType::SwarmMain,
+            ]),
             ua in arb_unified_address(),
         ) {
             let encoded = ua.encode(&network);
