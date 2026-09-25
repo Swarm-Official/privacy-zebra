@@ -19,6 +19,12 @@
 
 [patch.crates-io]
 zcash_protocol = { path = "../zcash_protocol" }
+# `zcash_address` and `zcash_transparent` both match `NetworkType` exhaustively, so once the
+# vendored `zcash_protocol` admits `NetworkType::SwarmMain` a standalone build of this crate does
+# not compile against the registry copies of those two. They are vendored for exactly that reason
+# and the consuming workspace patches all four to the same paths; this reproduces that resolution.
+zcash_address = { path = "../zcash_address" }
+zcash_transparent = { path = "../zcash_transparent" }
 
 [package]
 edition = "2024"

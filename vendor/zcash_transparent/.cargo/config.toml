@@ -1,0 +1,17 @@
+# Applies only to builds of this vendored crate on its own, i.e. when cargo is run
+# from this directory, or from the repository root with:
+#
+#   cargo test --locked --manifest-path vendor/zcash_transparent/Cargo.toml \
+#       --config vendor/zcash_transparent/.cargo/config.toml
+#
+# Without it a standalone build resolves `zcash_protocol` from crates.io, so the one
+# reason this crate is vendored -- the `NetworkType::SwarmMain` arm in `zip48::pub_prefix`
+# -- is not even compiled, and the suite silently proves nothing about it.
+# `zcash_address` matches `NetworkType` exhaustively too, so the registry copy of that
+# crate does not compile against the vendored protocol crate either.
+#
+# The node workspace applies the same patches from its own root manifest, so this only
+# reproduces that resolution.
+[patch.crates-io]
+zcash_protocol = { path = "../zcash_protocol" }
+zcash_address = { path = "../zcash_address" }
