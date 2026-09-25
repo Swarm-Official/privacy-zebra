@@ -3593,6 +3593,7 @@ async fn swarm_and_upstream_domains_are_accepted_only_on_their_own_network() {
             nu6_3: Some(1),
             ..Default::default()
         })
+        .expect("the activation heights are valid")
         .to_network()
         .expect("failed to build configured network");
     let swarm_network = swarm_main::fixture::network();
@@ -3689,8 +3690,7 @@ async fn swarm_and_upstream_domains_are_accepted_only_on_their_own_network() {
                         .await;
                 };
 
-                let (block_rsp, mempool_rsp, _) =
-                    futures::join!(block_req, mempool_req, state_req);
+                let (block_rsp, mempool_rsp, _) = futures::join!(block_req, mempool_req, state_req);
                 let txid = tx.unmined_id();
 
                 assert_eq!(

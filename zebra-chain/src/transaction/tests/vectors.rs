@@ -2246,9 +2246,8 @@ fn the_admitted_registry_still_rejects_the_fixture_and_unknown_domains() {
 
             // And no context resolves for it, so it has no transaction ID and no auth digest.
             assert_eq!(
-                DomainRegistry::ADMITTED.context_for_branch(
-                    tx.consensus_branch_id().expect("V5/V6 carries a domain")
-                ),
+                DomainRegistry::ADMITTED
+                    .context_for_branch(tx.consensus_branch_id().expect("V5/V6 carries a domain")),
                 None
             );
         }
