@@ -24,7 +24,9 @@ use zebra_chain::{
     },
     primitives::{ed25519, x25519, Groth16Proof},
     sapling,
-    serialization::{AtLeastOne, DateTime32, ZcashDeserialize, ZcashDeserializeInto},
+    serialization::{
+        AtLeastOne, DateTime32, ZcashDeserialize, ZcashDeserializeInto, ZcashSerialize,
+    },
     sprout,
     transaction::{
         arbitrary::{
@@ -3567,6 +3569,228 @@ async fn v5_consensus_branch_ids() {
             network_upgrade = next_nu;
         }
     }
+}
+
+/// (c) A V6 transaction is accepted by the block and mempool verifiers on exactly the network
+/// whose domain it carries, and rejected on the other, at height 1.
+///
+/// This is the replay protection the domain exists for, now that both families decode in one
+/// binary. `DomainRegistry::ADMITTED` lets a SWARM-domain transaction be parsed and hashed
+/// anywhere, so the rejection has to happen here, in validation, on both networks and through
+/// both verifiers.
+#[tokio::test]
+async fn swarm_and_upstream_domains_are_accepted_only_on_their_own_network() {
+    use zebra_chain::parameters::{
+        swarm_main, ConsensusBranchId, NetworkUpgrade, SWARM_PRODUCTION_DOMAIN,
+    };
+
+    let _init_guard = zebra_test::init();
+
+    // A testnet whose NU6.3 rules are in force from height 1, so the two networks differ only in
+    // their transaction domain and not in which rules apply at the height under test.
+    let upstream_network = Parameters::build()
+        .with_activation_heights(ConfiguredActivationHeights {
+            nu6_3: Some(1),
+            ..Default::default()
+        })
+        .to_network()
+        .expect("failed to build configured network");
+    let swarm_network = swarm_main::fixture::network();
+
+    let upstream_domain = NetworkUpgrade::Nu6_3
+        .branch_id()
+        .expect("NU6.3 has an upstream domain");
+
+    // Each network, paired with the domain it accepts and the domain it must reject.
+    let cases = [
+        (&swarm_network, SWARM_PRODUCTION_DOMAIN, upstream_domain),
+        (&upstream_network, upstream_domain, SWARM_PRODUCTION_DOMAIN),
+    ];
+
+    for (network, own_domain, foreign_domain) in cases {
+        for (label, domain, expect_ok) in [
+            ("own", own_domain, true),
+            ("foreign", foreign_domain, false),
+        ] {
+            let mut state = MockService::build().for_unit_tests();
+
+            let (input, output, known_utxos) = mock_transparent_transfer(
+                Height(1),
+                true,
+                0,
+                Amount::try_from(10001).expect("valid amount"),
+            );
+            let known_utxos = Arc::new(known_utxos);
+
+            let tx = Transaction::V6 {
+                consensus_branch_id: ConsensusBranchId::from(u32::from(domain)),
+                lock_time: LockTime::unlocked(),
+                expiry_height: Height::MAX_EXPIRY_HEIGHT,
+                inputs: vec![input],
+                outputs: vec![output],
+                sapling_shielded_data: None,
+                orchard_shielded_data: None,
+                ironwood_shielded_data: None,
+            };
+
+            let outpoint = match tx.inputs()[0] {
+                transparent::Input::PrevOut { outpoint, .. } => outpoint,
+                transparent::Input::Coinbase { .. } => {
+                    panic!("requires a non-coinbase transaction")
+                }
+            };
+
+            let block_verifier = Buffer::new(BlockTxVerifier::new(network, state.clone()), 10);
+            let mempool_verifier =
+                Buffer::new(MempoolTxVerifier::new_for_tests(network, state.clone()), 10);
+
+            if expect_ok {
+                let block_req = block_verifier
+                    .clone()
+                    .oneshot(BlockRequest {
+                        transaction_hash: tx.hash(),
+                        transaction: Arc::new(tx.clone()),
+                        known_utxos: known_utxos.clone(),
+                        height: Height(1),
+                        time: DateTime::<Utc>::MAX_UTC,
+                    })
+                    .map_ok(|rsp| rsp.tx_id)
+                    .map_err(|e| format!("{e}"));
+
+                let mempool_req = mempool_verifier
+                    .clone()
+                    .oneshot(MempoolRequest {
+                        transaction: tx.clone().into(),
+                        height: Height(1),
+                    })
+                    .map_ok(|rsp| rsp.transaction.transaction.id)
+                    .map_err(|e| format!("{e}"));
+
+                let state_req = async {
+                    state
+                        .expect_request(zebra_state::Request::UnspentBestChainUtxo(outpoint))
+                        .map(|r| {
+                            r.respond(zebra_state::Response::UnspentBestChainUtxo(
+                                known_utxos.get(&outpoint).map(|utxo| utxo.utxo.clone()),
+                            ))
+                        })
+                        .await;
+
+                    state
+                        .expect_request_that(|req| {
+                            matches!(
+                                req,
+                                zebra_state::Request::CheckBestChainTipNullifiersAndAnchors(_)
+                            )
+                        })
+                        .map(|r| {
+                            r.respond(zebra_state::Response::ValidBestChainTipNullifiersAndAnchors)
+                        })
+                        .await;
+                };
+
+                let (block_rsp, mempool_rsp, _) =
+                    futures::join!(block_req, mempool_req, state_req);
+                let txid = tx.unmined_id();
+
+                assert_eq!(
+                    block_rsp,
+                    Ok(txid),
+                    "{network}: the block verifier must accept its {label} domain"
+                );
+                assert_eq!(
+                    mempool_rsp,
+                    Ok(txid),
+                    "{network}: the mempool verifier must accept its {label} domain"
+                );
+            } else {
+                // The transaction still decodes, hashes and round-trips: the rejection is a
+                // consensus decision, not a parse failure.
+                assert_eq!(
+                    tx.zcash_serialize_to_vec()
+                        .expect("a foreign-domain transaction still serializes")
+                        .zcash_deserialize_into::<Transaction>()
+                        .expect("a foreign-domain transaction still deserializes"),
+                    tx
+                );
+
+                let block_rsp = block_verifier
+                    .clone()
+                    .oneshot(BlockRequest {
+                        transaction_hash: tx.hash(),
+                        transaction: Arc::new(tx.clone()),
+                        known_utxos: known_utxos.clone(),
+                        height: Height(1),
+                        time: DateTime::<Utc>::MAX_UTC,
+                    })
+                    .map_err(|err| *err.downcast().expect("`TransactionError` type"))
+                    .await;
+
+                let mempool_rsp = mempool_verifier
+                    .clone()
+                    .oneshot(MempoolRequest {
+                        transaction: tx.clone().into(),
+                        height: Height(1),
+                    })
+                    .map_err(|err| *err.downcast().expect("`TransactionError` type"))
+                    .await;
+
+                assert_eq!(
+                    block_rsp,
+                    Err(TransactionError::WrongConsensusBranchId),
+                    "{network}: the block verifier must reject the {label} domain"
+                );
+                assert_eq!(
+                    mempool_rsp,
+                    Err(TransactionError::WrongConsensusBranchId),
+                    "{network}: the mempool verifier must reject the {label} domain"
+                );
+            }
+        }
+    }
+}
+
+/// (e) Existing testnet block fixtures still validate on Testnet after the decode registry
+/// widened.
+///
+/// `merkle_root_validity` runs `Block::check_transaction_network_upgrade_consistency`, which this
+/// change rewrote from an upgrade comparison to a domain comparison. This walks the whole testnet
+/// block corpus through it, so the rewrite cannot have changed which upstream blocks are
+/// consistent.
+#[test]
+fn existing_testnet_block_fixtures_still_validate() {
+    let _init_guard = zebra_test::init();
+
+    let network = Network::new_default_testnet();
+    let mut checked = 0usize;
+
+    for (height, block_bytes) in zebra_test::vectors::TESTNET_BLOCKS.iter() {
+        let block = block_bytes
+            .zcash_deserialize_into::<Block>()
+            .expect("testnet block fixture is valid");
+
+        let transaction_hashes: Vec<_> = block.transactions.iter().map(|tx| tx.hash()).collect();
+
+        crate::block::check::merkle_root_validity(&network, &block, &transaction_hashes)
+            .unwrap_or_else(|error| {
+                panic!("testnet height {height} must still validate: {error:?}")
+            });
+
+        // Every V5+ transaction in the corpus also passes the per-transaction domain check at its
+        // own height.
+        for transaction in &block.transactions {
+            check::consensus_branch_id(transaction, Height(*height), &network).unwrap_or_else(
+                |error| panic!("testnet height {height}: domain check must pass: {error:?}"),
+            );
+        }
+
+        checked += 1;
+    }
+
+    assert!(
+        checked > 5,
+        "the testnet block corpus must actually have been walked, checked {checked}"
+    );
 }
 
 // Utility functions

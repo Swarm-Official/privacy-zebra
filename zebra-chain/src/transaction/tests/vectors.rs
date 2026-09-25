@@ -1975,19 +1975,9 @@ fn swarm_production_domain_is_rejected_by_upstream_and_vice_versa() {
             .zcash_serialize_to_vec()
             .expect("the upstream transaction serializes");
 
-        // (c) The production encoder and the production wire decoder are pinned to the upstream
-        // registry, so neither accepts the SWARM domain.
-        let error = swarm_tx
-            .zcash_serialize_to_vec()
-            .expect_err("the production encoder rejects the SWARM domain");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(
-            swarm_bytes
-                .as_slice()
-                .zcash_deserialize_into::<Transaction>()
-                .is_err(),
-            "the production wire decoder rejects wire bytes carrying 0x53574d31"
-        );
+        // (c) The two registries stay disjoint: the upstream registry still rejects the SWARM
+        // domain in both directions. What changed is only which registry the *network-free*
+        // entry points use; `DomainRegistry::UPSTREAM` itself is untouched.
         assert!(
             Transaction::zcash_deserialize_in(swarm_bytes.as_slice(), DomainRegistry::UPSTREAM)
                 .is_err(),
@@ -2010,6 +2000,25 @@ fn swarm_production_domain_is_rejected_by_upstream_and_vice_versa() {
             .zcash_serialize_in(&mut Vec::new(), DomainRegistry::SWARM_PRODUCTION)
             .is_err());
 
+        // The production, network-free entry points now admit both families, so one binary can
+        // decode and hash a transaction of either. Rejecting the wrong family for a given network
+        // is enforced by validation instead; see
+        // `zebra_consensus::transaction::check::consensus_branch_id`.
+        assert_eq!(
+            swarm_tx
+                .zcash_serialize_to_vec()
+                .expect("the production encoder admits the SWARM domain"),
+            swarm_bytes,
+            "the production encoder writes the same bytes the SWARM registry does"
+        );
+        assert_eq!(
+            swarm_bytes
+                .as_slice()
+                .zcash_deserialize_into::<Transaction>()
+                .expect("the production decoder admits the SWARM domain"),
+            swarm_tx
+        );
+
         // The upstream transaction is untouched: in its own context it still produces exactly the
         // values the upgrade-only entry points produce.
         assert_eq!(upstream_tx.hash_in(&upstream_ctx), Some(upstream_tx.hash()));
@@ -2024,5 +2033,224 @@ fn swarm_production_domain_is_rejected_by_upstream_and_vice_versa() {
                 .expect("the production decoder still accepts upstream NU6.3 bytes"),
             upstream_tx
         );
+    }
+}
+
+/// (a) A SwarmMain V5 and V6 transaction round-trips through the *production*
+/// `ZcashSerialize`/`ZcashDeserialize` entry points and hashes under `0x53574d31`.
+///
+/// This is what a SwarmMain node needs in order to sync at all: the block and transaction codecs,
+/// `Transaction::hash()` and the Merkle roots have no network in scope, so they go through these
+/// entry points.
+#[test]
+fn swarm_production_transactions_round_trip_and_hash_through_the_production_entry_points() {
+    use crate::parameters::{DomainRegistry, SWARM_PRODUCTION_DOMAIN};
+
+    let _init_guard = zebra_test::init();
+
+    let swarm_ctx = DomainRegistry::SWARM_PRODUCTION
+        .context_for_rules(NetworkUpgrade::Nu6_3)
+        .expect("the SWARM registry has an NU6.3 domain");
+
+    let mut upstream_v5 = EMPTY_V5_TX.clone();
+    upstream_v5
+        .update_network_upgrade(NetworkUpgrade::Nu6_3)
+        .expect("NU6.3 has a branch ID");
+    let upstream_v6 = arbitrary::fake_v6_transaction(NetworkUpgrade::Nu6_3, None, None);
+
+    for (label, upstream_tx) in [("V5", upstream_v5), ("V6", upstream_v6)] {
+        let swarm_tx = with_raw_domain(&upstream_tx, SWARM_PRODUCTION_DOMAIN);
+
+        // Round-trip through the production trait impls, with no registry named by the caller.
+        let bytes = swarm_tx
+            .zcash_serialize_to_vec()
+            .unwrap_or_else(|error| panic!("{label}: production encoder must accept: {error}"));
+        let decoded: Transaction = bytes
+            .as_slice()
+            .zcash_deserialize_into()
+            .unwrap_or_else(|error| panic!("{label}: production decoder must accept: {error}"));
+        assert_eq!(decoded, swarm_tx, "{label}: round-trip is lossless");
+
+        // The raw domain survives the round-trip byte for byte.
+        assert_eq!(
+            decoded.consensus_branch_id(),
+            Some(SWARM_PRODUCTION_DOMAIN),
+            "{label}: the wire keeps 0x53574d31"
+        );
+        assert_eq!(
+            u32::from(decoded.consensus_branch_id().expect("V5/V6 has a domain")),
+            0x5357_4d31
+        );
+
+        // And the production hashing entry points now resolve the SWARM domain, producing exactly
+        // the values the explicit SWARM context produces.
+        assert_eq!(
+            swarm_tx.hash_in(&swarm_ctx),
+            Some(swarm_tx.hash()),
+            "{label}: `Transaction::hash` uses the SWARM domain"
+        );
+        assert_eq!(
+            swarm_tx.auth_digest_in(&swarm_ctx),
+            swarm_tx.auth_digest(),
+            "{label}: `auth_digest` uses the SWARM domain"
+        );
+
+        // The domain is part of the ZIP-244 personalization, so the two families never collide.
+        assert_ne!(
+            swarm_tx.hash(),
+            upstream_tx.hash(),
+            "{label}: the domain separates transaction IDs"
+        );
+        assert_ne!(
+            swarm_tx.auth_digest(),
+            upstream_tx.auth_digest(),
+            "{label}: the domain separates auth digests"
+        );
+    }
+}
+
+/// (b) Every golden upstream transaction vector is byte-identical and hash-identical after the
+/// decode registry widened.
+///
+/// The upstream table is listed first in `DomainRegistry::ADMITTED`, and the SWARM domain is
+/// disjoint from it, so no upstream transaction can resolve differently. This asserts that over
+/// the block test-vector corpus rather than arguing it.
+#[test]
+fn widening_the_decode_registry_leaves_every_upstream_vector_identical() {
+    let _init_guard = zebra_test::init();
+
+    let mut checked = 0usize;
+
+    for (label, blocks) in [
+        ("mainnet", zebra_test::vectors::MAINNET_BLOCKS.iter()),
+        ("testnet", zebra_test::vectors::TESTNET_BLOCKS.iter()),
+    ] {
+        for (height, block_bytes) in blocks {
+            let block = block_bytes
+                .zcash_deserialize_into::<Block>()
+                .expect("block test vector is valid");
+
+            for transaction in &block.transactions {
+                // Re-serializing through the production encoder reproduces the original bytes.
+                let bytes = transaction
+                    .zcash_serialize_to_vec()
+                    .expect("vector transaction serializes");
+                let round_tripped: Transaction = bytes
+                    .as_slice()
+                    .zcash_deserialize_into()
+                    .expect("vector transaction round-trips");
+                assert_eq!(
+                    &round_tripped,
+                    transaction.as_ref(),
+                    "{label} height {height}: transaction must round-trip unchanged"
+                );
+
+                // And every hash is still the one the upstream context produces.
+                if let Some(branch) = transaction.consensus_branch_id() {
+                    let ctx = crate::parameters::DomainRegistry::UPSTREAM
+                        .context_for_branch(branch)
+                        .expect("a vector transaction carries an upstream domain");
+                    assert_eq!(
+                        transaction.hash_in(&ctx),
+                        Some(transaction.hash()),
+                        "{label} height {height}: txid must match the upstream context"
+                    );
+                    assert_eq!(
+                        transaction.auth_digest_in(&ctx),
+                        transaction.auth_digest(),
+                        "{label} height {height}: auth digest must match the upstream context"
+                    );
+                }
+
+                checked += 1;
+            }
+
+            // The whole block's Merkle root is unchanged, which is the hash identity that
+            // actually matters for consensus.
+            let merkle_root: crate::block::merkle::Root =
+                block.transactions.iter().map(|tx| tx.hash()).collect();
+            assert_eq!(
+                block.header.merkle_root, merkle_root,
+                "{label} height {height}: the Merkle root must be unchanged"
+            );
+        }
+    }
+
+    assert!(
+        checked > 100,
+        "the upstream vector corpus must actually have been walked, checked {checked}"
+    );
+}
+
+/// (d) The `#[cfg(test)]` fixture domain and arbitrary unknown domains are still rejected at
+/// decode, by the production entry points and by `DomainRegistry::ADMITTED` itself.
+///
+/// Widening the decode registry to the union of the two production families must not turn it into
+/// an open registry.
+#[test]
+fn the_admitted_registry_still_rejects_the_fixture_and_unknown_domains() {
+    use crate::parameters::{
+        ConsensusBranchId, DomainRegistry, CONSENSUS_BRANCH_IDS, FIXTURE_NU6_3_DOMAIN,
+        SWARM_PRODUCTION_DOMAIN,
+    };
+
+    let _init_guard = zebra_test::init();
+
+    // The registry is the closed union, and nothing more.
+    for (_rules, branch) in CONSENSUS_BRANCH_IDS {
+        assert!(DomainRegistry::ADMITTED.admits(*branch));
+    }
+    assert!(DomainRegistry::ADMITTED.admits(SWARM_PRODUCTION_DOMAIN));
+
+    let mut upstream_v5 = EMPTY_V5_TX.clone();
+    upstream_v5
+        .update_network_upgrade(NetworkUpgrade::Nu6_3)
+        .expect("NU6.3 has a branch ID");
+    let upstream_v6 = arbitrary::fake_v6_transaction(NetworkUpgrade::Nu6_3, None, None);
+
+    for unknown in [
+        FIXTURE_NU6_3_DOMAIN,
+        ConsensusBranchId::from(0x0000_0000u32),
+        ConsensusBranchId::from(0xdead_beefu32),
+        // One value away from the SWARM domain in each direction.
+        ConsensusBranchId::from(0x5357_4d30u32),
+        ConsensusBranchId::from(0x5357_4d32u32),
+    ] {
+        assert!(
+            !DomainRegistry::ADMITTED.admits(unknown),
+            "{unknown:?} must not be admitted"
+        );
+        assert_eq!(DomainRegistry::ADMITTED.context_for_branch(unknown), None);
+
+        for template in [&upstream_v5, &upstream_v6] {
+            let tx = with_raw_domain(template, unknown);
+
+            // The production encoder refuses to write it...
+            let error = tx
+                .zcash_serialize_to_vec()
+                .expect_err("the production encoder rejects an unadmitted domain");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+            // ...and the production decoder refuses to read it back off the wire, even though
+            // these bytes were produced without any registry check.
+            let mut bytes = Vec::new();
+            tx.zcash_serialize_admitted(&mut bytes)
+                .expect("test bytes are producible without a registry check");
+            assert!(
+                bytes
+                    .as_slice()
+                    .zcash_deserialize_into::<Transaction>()
+                    .is_err(),
+                "the production decoder rejects an unadmitted domain"
+            );
+
+            // And no context resolves for it, so it has no transaction ID and no auth digest.
+            assert_eq!(
+                DomainRegistry::ADMITTED.context_for_branch(
+                    tx.consensus_branch_id().expect("V5/V6 carries a domain")
+                ),
+                None
+            );
+        }
     }
 }

@@ -919,6 +919,36 @@ pub fn transaction_version_allowed(
     }
 }
 
+/// Checks that a V5 or V6 transaction commits to exactly the transaction domain this network
+/// uses at this height.
+///
+/// # Consensus
+///
+/// > [NU5 onward] The nConsensusBranchId field MUST match the consensus branch ID used for
+/// > SIGHASH transaction hashes, as specified in [ZIP-244].
+///
+/// <https://zips.z.cash/protocol/protocol.pdf#txnconsensus>
+///
+/// # Correctness
+///
+/// This is where the two-way replay protection between the upstream domains and the SWARM
+/// production domain is enforced, for block and mempool verification alike -- both reach it
+/// through `check_structure_and_network_rules`.
+///
+/// The comparison is against `network.domain_registry().context_at(network, height)`: the domain
+/// the *network* resolves, never a domain derived from the transaction's own claim. The
+/// network-free decode path admits both production domain families (see
+/// `DomainRegistry::ADMITTED`), so a SWARM-domain transaction now reaches this check on an
+/// upstream network instead of failing to parse, and is rejected here; symmetrically an upstream
+/// transaction is rejected on SwarmMain.
+///
+/// On the upstream networks this is value-for-value the check it replaces. The upstream table is
+/// a bijection between rules and domains, so "the transaction's upgrade equals the height's
+/// upgrade" and "the transaction's domain equals the height's domain" accept exactly the same
+/// transactions. The only transactions whose treatment changes are the ones that previously
+/// could not be decoded at all.
+///
+/// [ZIP-244]: https://zips.z.cash/zip-0244
 pub fn consensus_branch_id(
     tx: &Transaction,
     height: Height,
@@ -930,11 +960,18 @@ pub fn consensus_branch_id(
         return Ok(());
     }
 
-    let Some(tx_nu) = tx.network_upgrade() else {
+    let Some(tx_branch) = tx.consensus_branch_id() else {
         return Err(TransactionError::MissingConsensusBranchId);
     };
 
-    if tx_nu != current_nu {
+    // The rules in force at this height must name a domain at all. Every network that reaches
+    // this point does, because `current_nu >= Nu5`; a network whose registry admits no domain for
+    // its own current rules cannot accept a V5/V6 transaction there.
+    let Some(expected) = network.domain_registry().context_at(network, height) else {
+        return Err(TransactionError::WrongConsensusBranchId);
+    };
+
+    if tx_branch != expected.branch() {
         return Err(TransactionError::WrongConsensusBranchId);
     }
 

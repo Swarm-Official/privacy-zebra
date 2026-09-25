@@ -345,8 +345,20 @@ where
             let (spent_utxos, spent_outputs) =
                 Self::block_spent_utxos(tx.clone(), known_utxos, state.clone()).await?;
 
+            // The sighash context comes from the network's own domain registry at this height,
+            // not from the transaction's stored `nConsensusBranchId`. `check::consensus_branch_id`
+            // above has already required the two to agree; resolving it here from the network
+            // rather than from the transaction is what makes that check load-bearing instead of
+            // self-referential.
+            let ctx = network
+                .domain_registry()
+                .context_at(&network, height)
+                .ok_or(TransactionError::UnsupportedByNetworkUpgrade(
+                    tx.version(),
+                    nu,
+                ))?;
             let cached_ffi_transaction =
-                Arc::new(CachedFfiTransaction::new(tx.clone(), Arc::new(spent_outputs), nu).map_err(|_| TransactionError::UnsupportedByNetworkUpgrade(tx.version(), nu))?);
+                Arc::new(CachedFfiTransaction::new_in(tx.clone(), Arc::new(spent_outputs), &ctx).map_err(|_| TransactionError::UnsupportedByNetworkUpgrade(tx.version(), nu))?);
 
             tracing::trace!(?tx_id, "got state UTXOs");
 
@@ -552,8 +564,20 @@ where
             let unpaid_actions = transaction::zip317::unpaid_actions(&unmined_tx, miner_fee);
             transaction::zip317::mempool_checks(unpaid_actions, miner_fee, unmined_tx.size)?;
 
+            // The sighash context comes from the network's own domain registry at this height,
+            // not from the transaction's stored `nConsensusBranchId`. `check::consensus_branch_id`
+            // above has already required the two to agree; resolving it here from the network
+            // rather than from the transaction is what makes that check load-bearing instead of
+            // self-referential.
+            let ctx = network
+                .domain_registry()
+                .context_at(&network, height)
+                .ok_or(TransactionError::UnsupportedByNetworkUpgrade(
+                    tx.version(),
+                    nu,
+                ))?;
             let cached_ffi_transaction =
-                Arc::new(CachedFfiTransaction::new(tx.clone(), Arc::new(spent_outputs), nu).map_err(|_| TransactionError::UnsupportedByNetworkUpgrade(tx.version(), nu))?);
+                Arc::new(CachedFfiTransaction::new_in(tx.clone(), Arc::new(spent_outputs), &ctx).map_err(|_| TransactionError::UnsupportedByNetworkUpgrade(tx.version(), nu))?);
 
             tracing::trace!(?tx_id, "got state UTXOs");
 

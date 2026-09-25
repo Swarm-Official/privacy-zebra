@@ -591,11 +591,14 @@ impl ZcashSerialize for Transaction {
     ///
     /// # Correctness
     ///
-    /// This is the only serialization entry point reachable from production code, and it is
-    /// pinned to [`DomainRegistry::UPSTREAM`], so no domain outside the closed upstream table can
-    /// ever be written to the wire by a production build.
+    /// This is the only serialization entry point reachable from production code that has no
+    /// network in scope, so it is pinned to [`DomainRegistry::ADMITTED`]: the closed union of
+    /// the upstream table and the SWARM production domain, and nothing else. A domain outside
+    /// both families -- including the `#[cfg(test)]` fixture domain -- can still never be
+    /// written to the wire by a production build. Which of the two families a given network
+    /// accepts is decided by validation, not here; see [`DomainRegistry::ADMITTED`].
     fn zcash_serialize<W: io::Write>(&self, writer: W) -> Result<(), io::Error> {
-        self.zcash_serialize_in(writer, DomainRegistry::UPSTREAM)
+        self.zcash_serialize_in(writer, DomainRegistry::ADMITTED)
     }
 }
 
@@ -899,11 +902,13 @@ impl ZcashDeserialize for Transaction {
     ///
     /// # Correctness
     ///
-    /// This is the only deserialization entry point reachable from production code, and it is
-    /// pinned to [`DomainRegistry::UPSTREAM`], so a transaction whose wire domain is outside the
-    /// closed upstream table is rejected by every production build.
+    /// This is the only deserialization entry point reachable from production code that has no
+    /// network in scope, so it is pinned to [`DomainRegistry::ADMITTED`]: a transaction whose
+    /// wire domain is outside both closed production families is rejected by every production
+    /// build, exactly as before. A SWARM-domain transaction now decodes on any build, and is
+    /// rejected by the validation of every upstream network; see [`DomainRegistry::ADMITTED`].
     fn zcash_deserialize<R: io::Read>(reader: R) -> Result<Self, SerializationError> {
-        Transaction::zcash_deserialize_in(reader, DomainRegistry::UPSTREAM)
+        Transaction::zcash_deserialize_in(reader, DomainRegistry::ADMITTED)
     }
 }
 

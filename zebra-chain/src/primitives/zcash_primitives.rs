@@ -548,9 +548,13 @@ fn sighash_inner(
 ///
 /// [ZIP-244]: https://zips.z.cash/zip-0244
 pub(crate) fn auth_digest(tx: &Transaction) -> AuthDigest {
+    // No network is in scope here: this is reached from `AuthDigest::from(&Transaction)` and from
+    // the ZIP-244 authorizing-data Merkle root. It therefore admits both production domain
+    // families; a transaction of the wrong family for the network is rejected by validation, not
+    // by hashing. See `DomainRegistry::ADMITTED`.
     let ctx = tx
         .consensus_branch_id()
-        .and_then(|branch| DomainRegistry::UPSTREAM.context_for_branch(branch))
+        .and_then(|branch| DomainRegistry::ADMITTED.context_for_branch(branch))
         .expect("V5 tx has a network upgrade");
 
     auth_digest_in(tx, &ctx).expect("V5 tx is convertible to its `zcash_params` equivalent")

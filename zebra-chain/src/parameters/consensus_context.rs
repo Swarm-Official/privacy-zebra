@@ -24,11 +24,16 @@
 //! ZIP 200 domains exist for: an upstream transaction is rejected under the SWARM registry and a
 //! SWARM transaction is rejected under the upstream one.
 //!
-//! This patch does not yet *select* that registry anywhere. Every production entry point --
-//! `ZcashSerialize`/`ZcashDeserialize` for `Transaction`, the upgrade-only hashing wrappers and
-//! the ZIP-221 history domain -- stays pinned to [`DomainRegistry::UPSTREAM`]. Choosing the
-//! registry from the network is the next slice, and needs the SWARM network variant to exist
-//! first.
+//! Selection now happens in two places, and they are deliberately different. Every entry point
+//! that has a network in scope -- the ZIP-221 history domain, note decryption, the sighash and
+//! `PrecomputedTxData` construction inside verification, and every consensus check -- resolves
+//! its registry through [`Network::domain_registry`], so it admits one family and rejects the
+//! other. The four entry points that have no network in scope --
+//! `ZcashSerialize`/`ZcashDeserialize` for `Transaction`, `TxIdBuilder::txid` and `auth_digest`
+//! -- use [`DomainRegistry::ADMITTED`], the union of the two production families, so that one
+//! binary can decode and hash transactions of either family. The replay protection is unchanged
+//! in substance: it is enforced by validation, which compares a transaction's raw domain against
+//! the one its network's registry resolves at that height.
 //!
 //! The remaining non-upstream domain defined here is [`FIXTURE_NU6_3_DOMAIN`], which is
 //! `#[cfg(test)]` test data.
@@ -172,6 +177,51 @@ impl DomainRegistry {
         name: "swarm-production",
         base: SWARM_PRODUCTION_DOMAINS,
         extra: &[],
+    };
+
+    /// The registry the network-free entry points admit: the union of the two production
+    /// families, and nothing else.
+    ///
+    /// # Why a union, and why it is not a weakening
+    ///
+    /// `ZcashSerialize`/`ZcashDeserialize for Transaction`, `TxIdBuilder::txid` and
+    /// `auth_digest` have no network in scope: they are reached from the block and transaction
+    /// codecs, from Merkle root construction and from `Transaction::hash()`, none of which can
+    /// name a network. Pinning them to [`DomainRegistry::UPSTREAM`] meant a SwarmMain node could
+    /// not decode or hash its own transactions at all. Pinning them per-network would mean
+    /// threading a `&Network` through every one of those call sites, including trait methods
+    /// whose signatures are fixed by the serialization traits.
+    ///
+    /// So these four admit both closed families, and *validation* decides which one a given
+    /// network accepts. That moves the SWARM/upstream rejection from decode time to validation
+    /// time, and nowhere else:
+    ///
+    /// * `zebra_consensus::transaction::check::consensus_branch_id` requires every V5/V6
+    ///   transaction's raw domain to equal `network.domain_registry().context_at(network,
+    ///   height)`, for block and mempool verification alike.
+    /// * `Block::check_transaction_network_upgrade_consistency` applies the same equality over a
+    ///   whole block, and is called from both the block verifier and the state.
+    /// * the sighash/`PrecomputedTxData` construction inside verification resolves its context
+    ///   from the network, never from the transaction's own claim, and
+    ///   `Transaction::to_librustzcash_in` then refuses a transaction whose stored domain differs
+    ///   from that context.
+    ///
+    /// # Correctness
+    ///
+    /// This is still a closed `const` table with no runtime insertion. It admits exactly
+    /// [`CONSENSUS_BRANCH_IDS`] plus [`SWARM_PRODUCTION_DOMAIN`]; the `#[cfg(test)]` fixture
+    /// domain and every other unknown ID are still rejected at decode.
+    ///
+    /// Because the upstream table is listed first, `context_for_rules` on this registry returns
+    /// the *upstream* domain for the NU6.3 rules. That makes it the wrong registry to ever
+    /// *choose* a domain with. It is only ever used to ask whether a domain read off the wire is
+    /// one of the two production families, and which rules that domain selects. Production code
+    /// that produces or validates a domain resolves it through `Network::domain_registry`
+    /// instead.
+    pub const ADMITTED: &'static DomainRegistry = &DomainRegistry {
+        name: "admitted",
+        base: CONSENSUS_BRANCH_IDS,
+        extra: SWARM_PRODUCTION_DOMAINS,
     };
 
     /// A `#[cfg(test)]` registry that also admits [`FIXTURE_NU6_3_DOMAIN`] under the NU6.3 rules.
@@ -421,6 +471,61 @@ mod tests {
                     "{network} height {height:?} must not select the SWARM production domain"
                 );
             }
+        }
+    }
+
+    /// A block built for SwarmMain picks the SWARM production domain, and the V6 transaction
+    /// version that goes with it.
+    ///
+    /// This is what the coinbase builder and the block template do: `Builder::new` resolves
+    /// `BranchId::for_height` from the network, and takes the transaction version from that
+    /// branch. Before the SWARM network type was taught to `for_height`, a SwarmMain coinbase
+    /// would have been built under the *upstream* NU6.3 domain and rejected by SwarmMain's own
+    /// validation.
+    #[test]
+    fn swarm_main_selects_its_own_domain_and_the_v6_version_when_building() {
+        use zcash_primitives::transaction::TxVersion;
+        use zcash_protocol::consensus::{BlockHeight, BranchId};
+
+        let _init_guard = zebra_test::init();
+
+        let swarm = crate::parameters::swarm_main::fixture::network();
+
+        // Height 0 is Genesis: no domain applies, exactly as on every other network.
+        assert_eq!(
+            BranchId::for_height(&swarm, BlockHeight::from_u32(0)),
+            BranchId::Sprout
+        );
+
+        for height in [1u32, 2, 100, 1_000_000, u32::MAX] {
+            let height = BlockHeight::from_u32(height);
+            let branch = BranchId::for_height(&swarm, height);
+
+            assert_eq!(
+                branch,
+                BranchId::SwarmMain,
+                "a transaction built for SwarmMain at {height:?} must carry the SWARM domain"
+            );
+            assert_eq!(u32::from(branch), u32::from(SWARM_PRODUCTION_DOMAIN));
+
+            // V5/V6 only from height 1: the builder must not reach for a legacy version.
+            assert_eq!(
+                TxVersion::suggested_for_branch(branch),
+                TxVersion::V6,
+                "a SwarmMain coinbase at {height:?} must be a V6"
+            );
+        }
+
+        // And the domain the network's own registry resolves at those heights is the same one, so
+        // a coinbase built this way passes the validation this patch adds.
+        for height in [block::Height(1), block::Height(2), block::Height(1_000_000)] {
+            assert_eq!(
+                swarm
+                    .domain_registry()
+                    .context_at(&swarm, height)
+                    .map(|ctx| ctx.branch()),
+                Some(SWARM_PRODUCTION_DOMAIN)
+            );
         }
     }
 

@@ -24,8 +24,14 @@ impl<'a> TxIdBuilder<'a> {
     /// Compute the Transaction ID for the previously specified transaction.
     ///
     /// For V5 and V6 the context is derived from the domain the transaction stores, looked up in
-    /// the production `DomainRegistry::UPSTREAM` table. Returns `None` for a domain that table
-    /// does not admit, exactly as the previous derived-network-upgrade lookup did.
+    /// the production [`DomainRegistry::ADMITTED`] table, which is the closed union of the
+    /// upstream domains and the SWARM production domain. Returns `None` for a domain neither
+    /// family admits.
+    ///
+    /// The domain is part of the ZIP-244 personalization, so the two families produce different
+    /// transaction IDs for otherwise identical transactions. This method has no network in
+    /// scope -- it is reached from `Transaction::hash()` and from Merkle root construction --
+    /// so it admits both and leaves the network's choice to validation.
     pub(super) fn txid(self) -> Option<Hash> {
         match self.trans {
             Transaction::V1 { .. }
@@ -33,7 +39,7 @@ impl<'a> TxIdBuilder<'a> {
             | Transaction::V3 { .. }
             | Transaction::V4 { .. } => self.txid_v1_to_v4(),
             Transaction::V5 { .. } | Transaction::V6 { .. } => {
-                let ctx = DomainRegistry::UPSTREAM
+                let ctx = DomainRegistry::ADMITTED
                     .context_for_branch(self.trans.consensus_branch_id()?)?;
                 self.txid_v5_v6(&ctx)
             }

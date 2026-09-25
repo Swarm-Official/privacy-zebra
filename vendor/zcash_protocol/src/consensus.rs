@@ -790,8 +790,6 @@ pub enum BranchId {
     /// networks. Mapping a SWARM activation schedule onto this domain is the job of the SWARM
     /// network profile, not of this table.
     //
-    // TODO(P1c-next): when `NetworkType::SwarmMain` exists, add the SWARM production activation
-    // schedule so that `for_height` returns `SwarmMain` for that network type and only for it.
     SwarmMain,
 }
 
@@ -852,11 +850,28 @@ impl BranchId {
     /// # Correctness
     ///
     /// This walks `UPGRADES_IN_ORDER` and returns `nu.branch_id()`, so it can only return a
-    /// domain that some [`NetworkUpgrade`] names. [`BranchId::SwarmMain`] is named by no network
-    /// upgrade, so this never returns it, for any `Parameters` implementation including `Main`,
-    /// `Test` and `Regtest`. Selecting the SWARM production domain is the SWARM network profile's
-    /// job, not this function's.
+    /// For a network with an upstream consensus schedule this walks `UPGRADES_IN_ORDER` and
+    /// returns `nu.branch_id()`, so it can only return a domain that some [`NetworkUpgrade`]
+    /// names; [`BranchId::SwarmMain`] is named by no network upgrade, so it is never returned for
+    /// `Main`, `Test` or `Regtest`. [`BranchId::SwarmMain`] is returned only for a network whose
+    /// [`NetworkType`] reports no upstream consensus schedule, which today is exactly
+    /// [`NetworkType::SwarmMain`].
     pub fn for_height<P: Parameters>(parameters: &P, height: BlockHeight) -> Self {
+        // A network whose consensus schedule is not the upstream one selects its own domain, and
+        // never an upstream one. `NetworkType::SwarmMain` runs the NU6.3 rule revision under the
+        // `SwarmMain` domain from its first block; below that, at genesis, no domain applies and
+        // the pre-Overwinter answer is the same `Sprout` the loop below would give.
+        //
+        // This is gated on the network type, so no upstream `Parameters` implementation can reach
+        // it: `Main`, `Test` and `Regtest` all have an upstream schedule.
+        if !parameters.network_type().has_upstream_consensus_schedule() {
+            return if parameters.is_nu_active(NetworkUpgrade::Nu6_3, height) {
+                BranchId::SwarmMain
+            } else {
+                BranchId::Sprout
+            };
+        }
+
         for nu in UPGRADES_IN_ORDER.iter().rev() {
             if parameters.is_nu_active(*nu, height) {
                 return nu.branch_id();

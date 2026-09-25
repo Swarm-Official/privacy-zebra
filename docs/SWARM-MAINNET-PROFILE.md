@@ -117,17 +117,53 @@ genesis checkpoint, and it spends nothing, so there is no replay to protect agai
 `NetworkUpgrade::Genesis` in the SWARM activation list, and the SWARM domain registry deliberately
 admits no branch ID for it, so `ConsensusBranchId::current(&swarm_main, Height(0))` is `None`.
 
+## Transaction domain selection
+
+`Network::domain_registry()` is the single place that decides which ZIP-200 domains a network
+admits: upstream networks get `DomainRegistry::UPSTREAM`, SwarmMain gets
+`DomainRegistry::SWARM_PRODUCTION`, and the two are disjoint in both directions.
+
+Four entry points have no network in scope, because they are reached from the block and
+transaction codecs, from `Transaction::hash()` and from Merkle root construction:
+`ZcashSerialize`/`ZcashDeserialize for Transaction`, `TxIdBuilder::txid` and `auth_digest`.
+They use `DomainRegistry::ADMITTED`, the closed union of the two production families, so one
+binary can decode and hash transactions of either. That registry is still a `const` table with no
+runtime insertion: the `#[cfg(test)]` fixture domain and every other unknown ID are still rejected
+at decode, in every build.
+
+Rejecting the *wrong family for a network* is therefore a validation decision, not a parse
+failure. It is enforced at:
+
+- `zebra_consensus::transaction::check::consensus_branch_id`, which requires every V5/V6
+  transaction's raw `nConsensusBranchId` to equal
+  `network.domain_registry().context_at(network, height)`. Block and mempool verification both
+  reach it through `check_structure_and_network_rules`.
+- `Block::check_transaction_network_upgrade_consistency`, which applies the same equality over a
+  whole block, and is called from the block verifier (`merkle_root_validity`) and from the state's
+  legacy-chain check.
+- the sighash and `PrecomputedTxData` construction inside verification, which resolves its context
+  from the *network* and never from the transaction's own claim. `Transaction::to_librustzcash_in`
+  then refuses a transaction whose stored domain differs from that context, so the signatures are
+  never checked under a domain the transaction chose for itself.
+- note decryption and the ZIP-221 history tree, which already resolved through
+  `Network::domain_registry()`.
+
+On the upstream networks this accepts and rejects exactly what the previous decode-time rejection
+did. The upstream table is a bijection between rules and domains, so comparing domains and
+comparing upgrades admit the same transactions; the only transactions whose treatment changes are
+SWARM-domain ones, which previously failed to parse on an upstream node and are now parsed and
+then rejected by the first, cheapest consensus check.
+
+Blocks and coinbases built *for* SwarmMain select the SWARM domain because
+`zcash_protocol::consensus::BranchId::for_height` answers `BranchId::SwarmMain` for a network
+whose `NetworkType` reports no upstream consensus schedule, and only for such a network. That is
+what `getblocktemplate`'s coinbase builder and the internal miner go through, and
+`TxVersion::suggested_for_branch(BranchId::SwarmMain)` is `V6`, which satisfies the V5/V6-only
+rule at height 1 and above.
+
 ## What is not done yet
 
-- **Registry selection at the network-free entry points.** `ZcashSerialize`/`ZcashDeserialize for
-  Transaction`, `TxIdBuilder::txid`, `auth_digest` and `PrecomputedTxData::new` have no network in
-  scope and are still pinned to `DomainRegistry::UPSTREAM`, so a SwarmMain V5/V6 transaction
-  cannot yet be serialized or hashed through them, and `zebra-consensus`'s
-  `check::consensus_branch_id` still compares against the upstream table. The network-aware paths
-  (`Transaction::to_librustzcash_in`, `PrecomputedTxData::new_in`, `ConsensusBranchId::current`,
-  the ZIP-221 history domain and note decryption) already resolve through
-  `Network::domain_registry()`. Changing the network-free ones means deciding whether an upstream
-  node should keep rejecting a SWARM-domain transaction at decode or start rejecting it at
-  validation. That is an observable change on upstream networks, so it needs its own review and
-  its own commit. **Until it lands, a node configured for SwarmMain can be constructed and
-  validated but cannot sync a chain.**
+- **The launch ceremony inputs.** The genesis block hash and the three funding-stream recipient
+  addresses have no reviewed value yet, and there is deliberately no placeholder for either.
+- **A synced chain.** Nothing here has been exercised against a running SwarmMain node; the
+  production-domain rehearsal is what will do that.

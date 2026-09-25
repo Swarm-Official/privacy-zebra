@@ -374,13 +374,19 @@ where
                 format!("inconsistent network upgrade found in transaction: {error:?}")
             })?;
 
-        // If we find at least one transaction with a valid `network_upgrade` field, the Zebra instance that
-        // verified those blocks used the same network upgrade heights. (Up to this point in the chain.)
+        // If we find at least one transaction that carries an `nConsensusBranchId` at all, the
+        // Zebra instance that verified those blocks used the same network upgrade heights. (Up to
+        // this point in the chain.)
+        //
+        // This asks for the raw field rather than for a derived `NetworkUpgrade`, because a
+        // network whose domain is not in the upstream table -- SwarmMain -- has no derived upgrade
+        // for its own transactions, and would otherwise never find one and always report a legacy
+        // chain. On the upstream networks the two are equivalent: every domain that decodes there
+        // names an upgrade.
         let has_network_upgrade = block
             .transactions
             .iter()
-            .find_map(|trans| trans.network_upgrade())
-            .is_some();
+            .any(|trans| trans.consensus_branch_id().is_some());
         if has_network_upgrade {
             return Ok(());
         }

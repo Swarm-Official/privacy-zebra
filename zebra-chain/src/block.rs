@@ -109,8 +109,8 @@ impl Block {
         }
     }
 
-    /// Check if the `network_upgrade` fields from each transaction in the block matches
-    /// the network upgrade calculated from the `network` and block height.
+    /// Check that every V5/V6 transaction in the block commits to the transaction domain this
+    /// network uses at this block's height.
     ///
     /// # Consensus
     ///
@@ -119,20 +119,40 @@ impl Block {
     ///
     /// <https://zips.z.cash/protocol/protocol.pdf#txnconsensus>
     ///
+    /// # Correctness
+    ///
+    /// The comparison is against the domain `network`'s own registry resolves at this height,
+    /// never against a domain derived from a transaction's own claim. The network-free decode
+    /// path admits both production domain families (see
+    /// [`crate::parameters::DomainRegistry::ADMITTED`]), so a SWARM-domain transaction in a block
+    /// on an upstream network now reaches this check instead of failing to parse, and is rejected
+    /// here; symmetrically an upstream-domain transaction in a SwarmMain block is rejected.
+    ///
+    /// On the upstream networks this accepts and rejects exactly what the previous
+    /// upgrade-to-upgrade comparison did: the upstream table is a bijection, and every V5/V6
+    /// transaction that could be decoded before carried a domain that table names.
+    ///
     /// [ZIP-244]: https://zips.z.cash/zip-0244
     #[allow(clippy::unwrap_in_result)]
     pub fn check_transaction_network_upgrade_consistency(
         &self,
         network: &Network,
     ) -> Result<(), error::BlockError> {
-        let block_nu =
-            NetworkUpgrade::current(network, self.coinbase_height().expect("a valid height"));
+        let height = self.coinbase_height().expect("a valid height");
+
+        // The domain this network's transactions must commit to at this height, if the rules in
+        // force here name one at all. Genesis and BeforeOverwinter name none, and no V5/V6
+        // transaction may appear under them.
+        let expected = network
+            .domain_registry()
+            .context_at(network, height)
+            .map(|ctx| ctx.branch());
 
         if self
             .transactions
             .iter()
-            .filter_map(|trans| trans.as_ref().network_upgrade())
-            .any(|trans_nu| trans_nu != block_nu)
+            .filter_map(|trans| trans.as_ref().consensus_branch_id())
+            .any(|tx_branch| Some(tx_branch) != expected)
         {
             return Err(error::BlockError::WrongTransactionConsensusBranchId);
         }

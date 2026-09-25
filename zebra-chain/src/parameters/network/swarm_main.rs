@@ -501,6 +501,51 @@ pub fn activation_list() -> std::collections::BTreeMap<Height, crate::parameters
 /// Convenience alias for an `Arc`'d profile, which is what [`crate::parameters::Network`] holds.
 pub type SwarmMainParametersArc = Arc<SwarmMainParameters>;
 
+/// A complete SwarmMain profile built from fixed test values, and the network that holds it.
+///
+/// # Correctness
+///
+/// This is test scaffolding, gated on the test features, and it is the only way any crate other
+/// than this one can obtain a `Network::SwarmMain` value without supplying a real profile. The
+/// genesis hash and the three funding-stream destinations here are fixtures: they stand in for
+/// the values the launch ceremony will produce, and are not candidates for them.
+///
+/// It lives outside the `#[cfg(test)]` module below so that `zebra-consensus`, `zebra-state` and
+/// `zebra-rpc` tests can build a SwarmMain network too; those crates depend on `zebra-chain` with
+/// the `proptest-impl` feature for exactly this kind of fixture.
+#[cfg(any(test, feature = "proptest-impl"))]
+pub mod fixture {
+    use super::*;
+
+    use crate::parameters::Network;
+
+    /// A genesis hash that is neither upstream's nor the SWARM testnet's.
+    pub const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000abc";
+
+    /// SWARM production P2SH (`s3...`) addresses derived from fixed test strings.
+    pub const CORE: &str = "s3SMKDUgQ2JoZxEArhrUw5ofKtZG5YjknAC";
+    /// See [`CORE`].
+    pub const GRANTS: &str = "s3X7hSqNZJJXDfq28SRQ7JvbJbF43vfGpiQ";
+    /// See [`CORE`].
+    pub const RESERVE: &str = "s3Nv3ARoQTLNkhHhbShTP9pRjhRWBXVP7n4";
+
+    /// A builder with every required field supplied.
+    pub fn builder() -> SwarmMainParametersBuilder {
+        SwarmMainParameters::build()
+            .with_genesis_hash(GENESIS.parse().expect("fixture genesis parses"))
+            .with_funding_stream_address(FundingStreamReceiver::Ecc, CORE)
+            .with_funding_stream_address(FundingStreamReceiver::MajorGrants, GRANTS)
+            .with_funding_stream_address(FundingStreamReceiver::ZcashFoundation, RESERVE)
+    }
+
+    /// A `Network::SwarmMain` holding the complete fixture profile.
+    pub fn network() -> Network {
+        Network::SwarmMain(Arc::new(
+            builder().finish().expect("the fixture profile is complete"),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,14 +562,13 @@ mod tests {
     ///
     /// Test data: it stands in for the hash the launch ceremony will produce, and proves only
     /// that the builder accepts a supplied one. It is not a candidate value.
-    const FIXTURE_GENESIS: &str =
-        "0000000000000000000000000000000000000000000000000000000000000abc";
+    const FIXTURE_GENESIS: &str = super::fixture::GENESIS;
 
     /// SWARM production P2SH (`s3...`) addresses derived from fixed test strings. Test data only:
     /// the real destinations are generated at the launch ceremony.
-    const FIXTURE_CORE: &str = "s3SMKDUgQ2JoZxEArhrUw5ofKtZG5YjknAC";
-    const FIXTURE_GRANTS: &str = "s3X7hSqNZJJXDfq28SRQ7JvbJbF43vfGpiQ";
-    const FIXTURE_RESERVE: &str = "s3Nv3ARoQTLNkhHhbShTP9pRjhRWBXVP7n4";
+    const FIXTURE_CORE: &str = super::fixture::CORE;
+    const FIXTURE_GRANTS: &str = super::fixture::GRANTS;
+    const FIXTURE_RESERVE: &str = super::fixture::RESERVE;
     /// A SWARM production P2PKH (`s1...`) address: the right network, the wrong address kind.
     const FIXTURE_P2PKH: &str = "s1Zxp3fq9J8ewT6tnQyQFci1Hhe37vHf8US";
     /// A SWARM *testnet* P2SH address, from `network/swarm-testnet/manifest.json`.
@@ -542,11 +586,7 @@ mod tests {
     }
 
     fn complete_network() -> Network {
-        Network::SwarmMain(Arc::new(
-            complete_builder()
-                .finish()
-                .expect("the fixture profile is complete"),
-        ))
+        super::fixture::network()
     }
 
     /// The identity constants, pinned. If any of these changes the network is a different

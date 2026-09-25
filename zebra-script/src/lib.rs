@@ -17,7 +17,7 @@ use libzcash_script::ZcashScript;
 
 use zcash_script::{opcode::PossiblyBad, script, script::Evaluable as _, Opcode};
 use zebra_chain::{
-    parameters::NetworkUpgrade,
+    parameters::{ConsensusContext, NetworkUpgrade},
     transaction::{HashType, SigHasher},
     transparent,
 };
@@ -93,9 +93,39 @@ pub struct CachedFfiTransaction {
 }
 
 impl CachedFfiTransaction {
+    /// Construct a `CachedFfiTransaction` in an explicit consensus context.
+    ///
+    /// # Correctness
+    ///
+    /// This is the form production verification uses. `ctx` must come from the *network's* own
+    /// domain registry at the block height being verified, never from the transaction's stored
+    /// `nConsensusBranchId`: the sighash personalization commits to the domain in `ctx`, so
+    /// resolving it from the transaction's own claim would let a transaction pick the domain its
+    /// signatures are checked under, and the two-way replay protection would be vacuous.
+    ///
+    /// Returns an error if the transaction does not belong to `ctx`'s domain, which is that
+    /// replay check.
+    pub fn new_in(
+        transaction: Arc<zebra_chain::transaction::Transaction>,
+        all_previous_outputs: Arc<Vec<transparent::Output>>,
+        ctx: &ConsensusContext,
+    ) -> Result<Self, Error> {
+        let sighasher = transaction.sighasher_in(ctx, all_previous_outputs.clone())?;
+        Ok(Self {
+            transaction,
+            all_previous_outputs,
+            sighasher,
+        })
+    }
+
     /// Construct a `CachedFfiTransaction` from a `Transaction` and the outputs
     /// from previous transactions that match each input in the transaction
     /// being verified.
+    ///
+    /// The context is resolved from the upstream domain table, so this only produces the right
+    /// sighashes on an upstream network. Production verification uses
+    /// [`CachedFfiTransaction::new_in`]; this form is retained for tests and for callers that
+    /// are upstream-only by construction.
     pub fn new(
         transaction: Arc<zebra_chain::transaction::Transaction>,
         all_previous_outputs: Arc<Vec<transparent::Output>>,
