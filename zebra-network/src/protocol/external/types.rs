@@ -292,7 +292,7 @@ mod swarm_main_tests {
     use zebra_chain::{
         block::Height,
         parameters::{
-            network::swarm_main::{self, fixture},
+            swarm_main::{self, fixture},
             Network, NetworkKind, NetworkUpgrade,
         },
     };

@@ -784,8 +784,7 @@ mod tests {
         // The file's own field is enough: no --network is needed.
         let printed = public_summary(&document, None)
             .expect("a swarmmain key file must pass its own consistency check")
-            .join("
-");
+            .join("\n");
         assert!(printed.contains(&swarm_address), "{printed}");
         assert!(printed.contains("network        swarmmainnet"), "{printed}");
         assert!(

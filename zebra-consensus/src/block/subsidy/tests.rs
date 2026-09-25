@@ -178,7 +178,7 @@ fn test_funding_stream_ranges_dont_overlap() -> Result<(), Report> {
 fn swarm_main_funding_stream_addresses_resolve_at_every_height() -> Result<(), Report> {
     let _init_guard = zebra_test::init();
 
-    let network = zebra_chain::parameters::network::swarm_main::fixture::network();
+    let network = zebra_chain::parameters::swarm_main::fixture::network();
     let receivers = [
         FundingStreamReceiver::Ecc,
         FundingStreamReceiver::MajorGrants,
@@ -187,7 +187,9 @@ fn swarm_main_funding_stream_addresses_resolve_at_every_height() -> Result<(), R
 
     // Height 1 is the range start; 35_000 and 35_001 straddle the first upstream address period
     // boundary; the rest are later periods and the last height in the range.
-    for height in [1, 2, 100, 34_999, 35_000, 35_001, 70_001, 1_680_001, 50_399_998] {
+    for height in [
+        1, 2, 100, 34_999, 35_000, 35_001, 70_001, 1_680_001, 50_399_998,
+    ] {
         let height = Height(height);
         for receiver in receivers {
             let address = funding_stream_address(height, &network, receiver)

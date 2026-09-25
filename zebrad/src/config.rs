@@ -198,11 +198,13 @@ impl With<MinerAddressType> for ZebradConfig {
     /// safe answer. This used to index a map infallibly and panicked on SwarmMain.
     fn with(mut self, miner_address_type: MinerAddressType) -> Self {
         self.mining.miner_address =
-            default_miner_address(self.network.network.kind(), &miner_address_type).map(|address| {
-                address
-                    .parse()
-                    .expect("hard-coded default miner addresses are valid")
-            });
+            default_miner_address(self.network.network.kind(), &miner_address_type).map(
+                |address| {
+                    address
+                        .parse()
+                        .expect("hard-coded default miner addresses are valid")
+                },
+            );
 
         self
     }
