@@ -3,6 +3,7 @@ exclude = [
         "vendor/zcash_address",
         "vendor/zcash_primitives",
         "vendor/zcash_protocol",
+        "vendor/zcash_transparent",
 ]
 members = [
         "zebrad",
@@ -38,6 +39,9 @@ zcash_address = { path = "vendor/zcash_address" }
 # vendored from the same published sources and patched alongside it. Neither version is bumped.
 zcash_primitives = { path = "vendor/zcash_primitives" }
 zcash_protocol = { path = "vendor/zcash_protocol" }
+# Vendored only so that the exhaustive `NetworkType` match in its `zip48` module can
+# handle `NetworkType::SwarmMain` explicitly; see vendor/README.md.
+zcash_transparent = { path = "vendor/zcash_transparent" }
 
 # `cargo release` settings
 

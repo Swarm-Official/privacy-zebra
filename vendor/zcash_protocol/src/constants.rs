@@ -2,6 +2,7 @@
 
 pub mod mainnet;
 pub mod regtest;
+pub mod swarm_mainnet;
 pub mod testnet;
 
 // The `V<n>_TX_VERSION` constants, although trivial, serve to clarify that a

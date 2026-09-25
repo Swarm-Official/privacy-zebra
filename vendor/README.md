@@ -5,6 +5,7 @@ Published upstream crates, MIT OR Apache-2.0:
 - zcash_address 0.13.0, archive SHA256 5a854b28c07dba372f4410ea8ad62b4bf7d5c2bf8be32fc4b31bc0db6521a975
 - zcash_protocol 0.10.1, archive SHA256 4034db33a1ce58416430e065b01474b958e4649caa3e06e20654683a95149710
 - zcash_primitives 0.30.0, archive SHA256 34ca4de11896f704ffe6319c2cd7bc8fc6ab31a55cec80d26def15c009d83678
+- zcash_transparent 0.10.0, crates.io checksum 547c012778bae17f58007731af074d638aa146ab0ecfc120adebf23d049aff6c
 
 `zcash_primitives` is vendored unmodified from that archive, whose SHA256 is the `checksum` this
 workspace's `Cargo.lock` already pinned for the registry copy, and is then patched only to admit
@@ -25,3 +26,19 @@ encodings retain their existing parameters. Source bytes and licenses are kept.
 The consuming workspace selects these sources with Cargo patches. Downstream
 workspaces must repeat those patches. This source integration precedes coordinated
 node, indexer and wallet releases and live testnet payment verification.
+
+## SWARM production network type (P1d)
+
+`zcash_protocol` gained `NetworkType::SwarmMain`, the SWARM production network
+identity, with its constants in `src/constants/swarm_mainnet.rs`. The Bech32m HRP
+root there is PROVISIONAL (`svm`, pending the owner's `svm` vs `swm` confirmation)
+and every SWARM production HRP is derived from that one literal.
+
+`zcash_transparent` 0.10.0 is vendored unchanged except for one function: its
+`zip48::pub_prefix` matched `NetworkType` exhaustively, so a new variant would not
+compile. It now returns `Option<Prefix>` and yields `None` for `SwarmMain`, so
+`parse_key_info_expression` simply does not match instead of silently reusing the
+Zcash mainnet `xpub` or testnet `tpub` prefix.
+
+No activation height and no consensus branch ID is defined for `SwarmMain` in any
+vendored crate: the production schedule is admitted by P1c.

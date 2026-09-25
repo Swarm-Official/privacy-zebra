@@ -210,6 +210,10 @@ pub(crate) mod private {
         const MAINNET: &'static str;
         const TESTNET: &'static str;
         const REGTEST: &'static str;
+        /// The HRP for the SWARM production network.
+        ///
+        /// This is a distinct network identity, never an alias of `TESTNET` or `MAINNET`.
+        const SWARM_MAINNET: &'static str;
 
         /// Implementations of this method should act as unchecked constructors
         /// of the container type; the caller is guaranteed to check the
@@ -221,15 +225,22 @@ pub(crate) mod private {
                 NetworkType::Main => Self::MAINNET,
                 NetworkType::Test => Self::TESTNET,
                 NetworkType::Regtest => Self::REGTEST,
+                NetworkType::SwarmMain => Self::SWARM_MAINNET,
             }
         }
 
         fn hrp_network(hrp: &str) -> Option<NetworkType> {
-            if hrp == Self::MAINNET {
+            // The SWARM production HRP is tested FIRST and has no aliases, so it can
+            // never be swallowed by the historical testnet alias arm below.
+            if hrp == Self::SWARM_MAINNET {
+                Some(NetworkType::SwarmMain)
+            } else if hrp == Self::MAINNET {
                 Some(NetworkType::Main)
             } else if hrp == Self::TESTNET
-                || matches!((Self::TESTNET, hrp),
-                    ("swarm", "utest") | ("uviewswarm", "uviewtest") | ("uivkswarm", "uivktest"))
+                || matches!(
+                    (Self::TESTNET, hrp),
+                    ("swarm", "utest") | ("uviewswarm", "uviewtest") | ("uivkswarm", "uivktest")
+                )
             {
                 Some(NetworkType::Test)
             } else if hrp == Self::REGTEST {

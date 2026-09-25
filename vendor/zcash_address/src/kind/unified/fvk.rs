@@ -163,6 +163,11 @@ impl SealedContainer for Ufvk {
     /// [zip-0316]: https://zips.z.cash/zip-0316
     const REGTEST: &'static str = constants::regtest::HRP_UNIFIED_FVK;
 
+    /// The HRP for a Bech32m-encoded SWARM production Unified FVK.
+    ///
+    /// PROVISIONAL root, see `zcash_protocol::constants::swarm_mainnet::HRP_ROOT`.
+    const SWARM_MAINNET: &'static str = constants::swarm_mainnet::HRP_UNIFIED_FVK;
+
     fn from_inner(fvks: Vec<Self::Item>) -> Self {
         Self(fvks)
     }
@@ -247,7 +252,12 @@ mod tests {
     proptest! {
         #[test]
         fn ufvk_roundtrip(
-            network in select(vec![NetworkType::Main, NetworkType::Test, NetworkType::Regtest]),
+            network in select(vec![
+                NetworkType::Main,
+                NetworkType::Test,
+                NetworkType::Regtest,
+                NetworkType::SwarmMain,
+            ]),
             ufvk in arb_unified_fvk(),
         ) {
             let encoded = ufvk.encode(&network);

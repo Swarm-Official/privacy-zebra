@@ -7,6 +7,17 @@ use zcash_protocol::consensus::NetworkType;
 
 use crate::{parameters::NetworkKind, transparent, BoxError};
 
+/// A [`NetworkType`] that `zebra_chain` has no [`NetworkKind`] for.
+///
+/// Today this is only [`NetworkType::SwarmMain`]: the SWARM production network type
+/// exists in the shared protocol crates (so its address encodings can be defined and
+/// tested) but the node has no production network profile yet. Converting it silently
+/// into `Mainnet` or `Testnet` would be exactly the cross-network confusion this
+/// variant exists to prevent, so the conversion fails instead.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("network type {0:?} has no zebra network kind: production schedule admitted by P1c")]
+pub struct UnsupportedNetworkType(pub NetworkType);
+
 /// Zcash address variants
 pub enum Address {
     /// Transparent address
@@ -49,7 +60,7 @@ impl zcash_address::TryFromAddress for Address {
         data: [u8; 20],
     ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
         Ok(Self::Transparent(transparent::Address::from_pub_key_hash(
-            network.into(),
+            NetworkKind::try_from(network).map_err(BoxError::from)?,
             data,
         )))
     }
@@ -59,7 +70,7 @@ impl zcash_address::TryFromAddress for Address {
         data: [u8; 20],
     ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
         Ok(Self::Transparent(transparent::Address::from_script_hash(
-            network.into(),
+            NetworkKind::try_from(network).map_err(BoxError::from)?,
             data,
         )))
     }
@@ -68,7 +79,7 @@ impl zcash_address::TryFromAddress for Address {
         network: NetworkType,
         data: [u8; 43],
     ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
-        let network = network.into();
+        let network = NetworkKind::try_from(network).map_err(BoxError::from)?;
         sapling_crypto::PaymentAddress::from_bytes(&data)
             .map(|address| Self::Sapling { address, network })
             .ok_or_else(|| BoxError::from("not a valid sapling address").into())
@@ -78,7 +89,7 @@ impl zcash_address::TryFromAddress for Address {
         network: NetworkType,
         unified_address: zcash_address::unified::Address,
     ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
-        let network = network.into();
+        let network = NetworkKind::try_from(network).map_err(BoxError::from)?;
         let mut orchard = None;
         let mut sapling = None;
         let mut transparent = None;
@@ -135,7 +146,7 @@ impl zcash_address::TryFromAddress for Address {
         data: [u8; 20],
     ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
         Ok(Self::Transparent(transparent::Address::from_tex(
-            network.into(),
+            NetworkKind::try_from(network).map_err(BoxError::from)?,
             data,
         )))
     }
@@ -181,13 +192,19 @@ impl Address {
     }
 }
 
-impl From<NetworkType> for NetworkKind {
-    fn from(network: NetworkType) -> Self {
-        match network {
+impl TryFrom<NetworkType> for NetworkKind {
+    type Error = UnsupportedNetworkType;
+
+    fn try_from(network: NetworkType) -> Result<Self, Self::Error> {
+        Ok(match network {
             NetworkType::Main => NetworkKind::Mainnet,
             NetworkType::Test => NetworkKind::Testnet,
             NetworkType::Regtest => NetworkKind::Regtest,
-        }
+            // Deliberately NOT mapped to Mainnet or Testnet: production schedule
+            // admitted by P1c. Until the node has a SWARM production network profile,
+            // a `SwarmMain` address has no `NetworkKind` and must be refused.
+            NetworkType::SwarmMain => return Err(UnsupportedNetworkType(network)),
+        })
     }
 }
 
@@ -204,5 +221,65 @@ impl From<NetworkKind> for NetworkType {
 impl From<&NetworkKind> for NetworkType {
     fn from(network: &NetworkKind) -> Self {
         (*network).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use zcash_address::{TryFromAddress, ZcashAddress};
+
+    /// The existing network kinds must keep converting both ways, byte for byte.
+    #[test]
+    fn upstream_network_kinds_round_trip() {
+        for (net, kind) in [
+            (NetworkType::Main, NetworkKind::Mainnet),
+            (NetworkType::Test, NetworkKind::Testnet),
+            (NetworkType::Regtest, NetworkKind::Regtest),
+        ] {
+            assert_eq!(NetworkKind::try_from(net), Ok(kind));
+            assert_eq!(NetworkType::from(kind), net);
+        }
+    }
+
+    /// The SWARM production network type has no `NetworkKind`, so a `SwarmMain` address
+    /// can never be converted into a zebra address and treated as Mainnet or Testnet.
+    #[test]
+    fn swarm_main_has_no_network_kind() {
+        assert_eq!(
+            NetworkKind::try_from(NetworkType::SwarmMain),
+            Err(UnsupportedNetworkType(NetworkType::SwarmMain)),
+        );
+
+        // The shared crate parses SWARM production encodings ...
+        for encoded in [
+            "s1MCkDhVejM4RqDyRR1rEJkudd26FVWipPD",
+            "s3Mtm9Ez6HFNovPfrY7WpjPGZmYNxztrxbb",
+        ] {
+            let parsed: ZcashAddress = encoded.parse().expect("parses in zcash_address");
+            // ... and zebra refuses to convert them into one of its own address types.
+            assert!(
+                parsed.convert::<Address>().is_err(),
+                "{encoded} must not convert to a zebra address",
+            );
+        }
+    }
+
+    /// The published SwarmTestnet destinations keep converting as Testnet addresses.
+    #[test]
+    fn swarm_testnet_destinations_still_convert() {
+        for encoded in [
+            "t2DGVURG5tAyXXSkj85JV5xbvTobYv7H99n",
+            "t2LVPzRYpZ4QtRRmQMS1zWUmG7TZaYcMjBR",
+            "t2UHhsicXnapNJrfewHqgwXef5HDwCHd7wk",
+            "t2Li46A4YNFqRDvdKA212w7DtsLkbGMG2xU",
+        ] {
+            let parsed: ZcashAddress = encoded.parse().expect("parses in zcash_address");
+            let address = parsed.convert::<Address>().expect("converts for zebra");
+            assert_eq!(address.network(), NetworkKind::Testnet);
+            assert!(address.is_script_hash());
+            assert_eq!(address.payment_address().as_deref(), Some(encoded));
+        }
     }
 }

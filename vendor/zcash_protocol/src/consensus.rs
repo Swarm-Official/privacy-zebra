@@ -9,7 +9,7 @@ use core::ops::{Add, Bound, RangeBounds, Sub};
 #[cfg(feature = "std")]
 use memuse::DynamicUsage;
 
-use crate::constants::{mainnet, regtest, testnet};
+use crate::constants::{mainnet, regtest, swarm_mainnet, testnet};
 
 /// A wrapper type representing blockchain heights.
 ///
@@ -203,6 +203,32 @@ pub enum NetworkType {
     /// For some address types there is no distinction between test and regtest encodings;
     /// those will always be parsed as `Network::Test`.
     Regtest,
+    /// The SWARM production network (SwarmMainnet).
+    ///
+    /// This is a SWARM-owned network identity, **not** Zcash Mainnet and **not** an alias
+    /// of any test network. Its encoding constants live in
+    /// [`crate::constants::swarm_mainnet`] and are disjoint from every other variant here,
+    /// so no string encoded for `SwarmMain` can be decoded as `Main`, `Test` or `Regtest`,
+    /// and no historical SWARM testnet string (`swarm1…`, `utest1…`, `uviewswarm…`,
+    /// `tm…`, `t2…`) can be decoded as `SwarmMain`.
+    ///
+    /// This crate deliberately defines **no** activation heights and **no** consensus
+    /// branch ID for `SwarmMain`: the production schedule is admitted by P1c.
+    SwarmMain,
+}
+
+impl NetworkType {
+    /// Returns `true` if this crate defines a consensus activation schedule and branch-ID
+    /// domain for this network type.
+    ///
+    /// [`NetworkType::SwarmMain`] returns `false`: the SWARM production schedule is
+    /// admitted by P1c, and must never fall back to upstream Zcash values.
+    pub const fn has_upstream_consensus_schedule(&self) -> bool {
+        match self {
+            NetworkType::Main | NetworkType::Test | NetworkType::Regtest => true,
+            NetworkType::SwarmMain => false,
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -303,6 +329,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::COIN_TYPE,
             NetworkType::Test => testnet::COIN_TYPE,
             NetworkType::Regtest => regtest::COIN_TYPE,
+            NetworkType::SwarmMain => swarm_mainnet::COIN_TYPE,
         }
     }
 
@@ -311,6 +338,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
             NetworkType::Test => testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
             NetworkType::Regtest => regtest::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            NetworkType::SwarmMain => swarm_mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
         }
     }
 
@@ -319,6 +347,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
             NetworkType::Test => testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
             NetworkType::Regtest => regtest::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+            NetworkType::SwarmMain => swarm_mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
         }
     }
 
@@ -327,6 +356,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             NetworkType::Test => testnet::HRP_SAPLING_PAYMENT_ADDRESS,
             NetworkType::Regtest => regtest::HRP_SAPLING_PAYMENT_ADDRESS,
+            NetworkType::SwarmMain => swarm_mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
         }
     }
 
@@ -335,6 +365,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::B58_SPROUT_ADDRESS_PREFIX,
             NetworkType::Test => testnet::B58_SPROUT_ADDRESS_PREFIX,
             NetworkType::Regtest => regtest::B58_SPROUT_ADDRESS_PREFIX,
+            NetworkType::SwarmMain => swarm_mainnet::B58_SPROUT_ADDRESS_PREFIX,
         }
     }
 
@@ -343,6 +374,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::B58_PUBKEY_ADDRESS_PREFIX,
             NetworkType::Test => testnet::B58_PUBKEY_ADDRESS_PREFIX,
             NetworkType::Regtest => regtest::B58_PUBKEY_ADDRESS_PREFIX,
+            NetworkType::SwarmMain => swarm_mainnet::B58_PUBKEY_ADDRESS_PREFIX,
         }
     }
 
@@ -351,6 +383,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::B58_SECRET_KEY_PREFIX,
             NetworkType::Test => testnet::B58_SECRET_KEY_PREFIX,
             NetworkType::Regtest => regtest::B58_SECRET_KEY_PREFIX,
+            NetworkType::SwarmMain => swarm_mainnet::B58_SECRET_KEY_PREFIX,
         }
     }
 
@@ -359,6 +392,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::B58_SCRIPT_ADDRESS_PREFIX,
             NetworkType::Test => testnet::B58_SCRIPT_ADDRESS_PREFIX,
             NetworkType::Regtest => regtest::B58_SCRIPT_ADDRESS_PREFIX,
+            NetworkType::SwarmMain => swarm_mainnet::B58_SCRIPT_ADDRESS_PREFIX,
         }
     }
 
@@ -367,6 +401,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::HRP_TEX_ADDRESS,
             NetworkType::Test => testnet::HRP_TEX_ADDRESS,
             NetworkType::Regtest => regtest::HRP_TEX_ADDRESS,
+            NetworkType::SwarmMain => swarm_mainnet::HRP_TEX_ADDRESS,
         }
     }
 
@@ -375,6 +410,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::HRP_UNIFIED_ADDRESS,
             NetworkType::Test => testnet::HRP_UNIFIED_ADDRESS,
             NetworkType::Regtest => regtest::HRP_UNIFIED_ADDRESS,
+            NetworkType::SwarmMain => swarm_mainnet::HRP_UNIFIED_ADDRESS,
         }
     }
 
@@ -383,6 +419,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::HRP_UNIFIED_FVK,
             NetworkType::Test => testnet::HRP_UNIFIED_FVK,
             NetworkType::Regtest => regtest::HRP_UNIFIED_FVK,
+            NetworkType::SwarmMain => swarm_mainnet::HRP_UNIFIED_FVK,
         }
     }
 
@@ -391,6 +428,7 @@ impl NetworkConstants for NetworkType {
             NetworkType::Main => mainnet::HRP_UNIFIED_IVK,
             NetworkType::Test => testnet::HRP_UNIFIED_IVK,
             NetworkType::Regtest => regtest::HRP_UNIFIED_IVK,
+            NetworkType::SwarmMain => swarm_mainnet::HRP_UNIFIED_IVK,
         }
     }
 }
@@ -1079,8 +1117,70 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockHeight, BranchId, MAIN_NETWORK, NetworkUpgrade, Parameters, UPGRADES_IN_ORDER,
+        BlockHeight, BranchId, MAIN_NETWORK, NetworkConstants, NetworkType, NetworkUpgrade,
+        Parameters, TEST_NETWORK, UPGRADES_IN_ORDER,
     };
+
+    /// Golden values for the SWARM production network type.
+    ///
+    /// The HRP root is PROVISIONAL (`svm` vs `swm`); if the owner flips it, the single
+    /// literal in `constants::swarm_mainnet` changes and this test is the place that
+    /// records the new expected strings.
+    #[test]
+    fn swarm_main_network_constants() {
+        let net = NetworkType::SwarmMain;
+        assert_eq!(net.coin_type(), 9767);
+        assert_eq!(net.b58_pubkey_address_prefix(), [0x1c, 0x28]);
+        assert_eq!(net.b58_script_address_prefix(), [0x1c, 0x2d]);
+        assert_eq!(net.hrp_unified_address(), "svm");
+        assert_eq!(net.hrp_unified_fvk(), "uviewsvm");
+        assert_eq!(net.hrp_unified_ivk(), "uivksvm");
+        assert_eq!(net.hrp_tex_address(), "texsvm");
+        assert_eq!(net.hrp_sapling_payment_address(), "zsvmsapling");
+        assert_eq!(
+            net.hrp_sapling_extended_spending_key(),
+            "secret-extended-key-svm"
+        );
+        assert_eq!(
+            net.hrp_sapling_extended_full_viewing_key(),
+            "zxviewsvmsapling"
+        );
+    }
+
+    /// The existing networks must keep every byte of their identity.
+    #[test]
+    fn upstream_network_constants_are_unchanged() {
+        assert_eq!(NetworkType::Main.coin_type(), 133);
+        assert_eq!(NetworkType::Test.coin_type(), 1);
+        assert_eq!(NetworkType::Regtest.coin_type(), 1);
+        assert_eq!(NetworkType::Main.b58_pubkey_address_prefix(), [0x1c, 0xb8]);
+        assert_eq!(NetworkType::Main.b58_script_address_prefix(), [0x1c, 0xbd]);
+        assert_eq!(NetworkType::Test.b58_pubkey_address_prefix(), [0x1d, 0x25]);
+        assert_eq!(NetworkType::Test.b58_script_address_prefix(), [0x1c, 0xba]);
+        assert_eq!(NetworkType::Main.hrp_unified_address(), "u");
+        // The SWARM testnet identity, unchanged.
+        assert_eq!(NetworkType::Test.hrp_unified_address(), "swarm");
+        assert_eq!(NetworkType::Test.hrp_unified_fvk(), "uviewswarm");
+        assert_eq!(NetworkType::Test.hrp_unified_ivk(), "uivkswarm");
+        assert_eq!(
+            NetworkType::Test.hrp_sapling_payment_address(),
+            "ztestsapling"
+        );
+        assert_eq!(NetworkType::Regtest.hrp_unified_address(), "uregtest");
+    }
+
+    /// `SwarmMain` must never pick up an upstream activation schedule or branch ID.
+    #[test]
+    fn swarm_main_has_no_upstream_consensus_schedule() {
+        assert!(!NetworkType::SwarmMain.has_upstream_consensus_schedule());
+        for net in [NetworkType::Main, NetworkType::Test, NetworkType::Regtest] {
+            assert!(net.has_upstream_consensus_schedule());
+        }
+        // The two `Parameters` impls in this crate only ever report the upstream
+        // network types, so no SWARM production height can be read out of them.
+        assert_eq!(MAIN_NETWORK.network_type(), NetworkType::Main);
+        assert_eq!(TEST_NETWORK.network_type(), NetworkType::Test);
+    }
 
     #[test]
     fn nu_ordering() {
