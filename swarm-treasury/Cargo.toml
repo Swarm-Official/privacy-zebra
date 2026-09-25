@@ -1,0 +1,64 @@
+[package]
+name = "swarm-treasury"
+version = "0.1.0"
+authors.workspace = true
+description = "Offline 2-of-3 custody tool for the SWARM treasury: signer keys, policy, spend proposals, separate-device signing and encrypted per-signer backups"
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+readme = "../README.md"
+homepage.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
+
+[[bin]]
+name = "swarm-treasury"
+path = "src/bin/swarm-treasury.rs"
+
+[dependencies]
+# Authenticated encryption for the per-signer backups. This crate writes no
+# cryptography of its own: `age` is an established, specified format
+# (https://c2sp.org/age) and the passphrase path uses its scrypt recipient.
+#
+#   age 0.12.1
+#   sha256 fd290633c2482479f70f6d1d96ae0e9f52c6a26cd5859edd47ee1fe33fc89f26
+#
+# Default features only (no `cli-common`, no `plugin`, no `ssh`, no `armor`):
+# the backup files are binary age files, not ASCII armour.
+age = { version = "0.12.1", default-features = false }
+
+chrono = { workspace = true, features = ["clock", "std"] }
+hex = { workspace = true }
+orchard = { workspace = true }
+rand = { workspace = true }
+ripemd = { workspace = true }
+secp256k1 = { workspace = true }
+serde = { workspace = true, features = ["serde_derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+zcash_address = { workspace = true }
+zcash_protocol = { workspace = true }
+
+zebra-chain = { path = "../zebra-chain", version = "12.0.0" }
+zebra-script = { path = "../zebra-script", version = "11.0.0" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tower = { workspace = true, features = ["util", "buffer"] }
+
+# The library tests run the tool's own output past the real consensus verifiers,
+# exactly as `zebra-consensus/tests/swarm_treasury_shielded_spend.rs` (task T2)
+# does. These edges are dev-dependencies only, and `zebra-consensus` in turn
+# dev-depends on this crate for the same construction code: a dependency cycle
+# through dev-dependencies, which Cargo supports, and which never appears in
+# either crate's library build.
+zebra-consensus = { path = "../zebra-consensus", version = "15.0.0" }
+zebra-node-services = { path = "../zebra-node-services", version = "10.0.0" }
+zebra-state = { path = "../zebra-state", version = "13.0.0" }
+zebra-test = { path = "../zebra-test" }
+
+[lints]
+workspace = true

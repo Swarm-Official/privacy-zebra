@@ -89,6 +89,9 @@ hex = { workspace = true }
 num-integer = { workspace = true }
 proptest = { workspace = true }
 proptest-derive = { workspace = true }
+# Only used by `tests/swarm_treasury_shielded_spend.rs`, to sign the 2-of-3 P2SH treasury input
+# with the published fixture scalars. Pinned to the workspace version already in Cargo.lock.
+secp256k1 = { workspace = true }
 spandoc = { workspace = true }
 
 tokio = { workspace = true, features = ["full", "tracing", "test-util"] }
@@ -98,6 +101,13 @@ tracing-subscriber = { workspace = true }
 zebra-state = { path = "../zebra-state", features = ["proptest-impl"] }
 zebra-chain = { path = "../zebra-chain", features = ["proptest-impl"] }
 zebra-test = { path = "../zebra-test/" }
+
+# The shielded-bundle construction that `tests/swarm_treasury_shielded_spend.rs` drives lives in
+# the custody tool (task T3), so the fixture and the tool cannot drift apart. `swarm-treasury` in
+# turn dev-depends on this crate, to run its own output past these verifiers: a dependency cycle
+# through dev-dependencies only, which Cargo supports and which never appears in either library
+# build.
+swarm-treasury = { path = "../swarm-treasury", version = "0.1.0" }
 
 criterion = { workspace = true, features = ["html_reports"] }
 
