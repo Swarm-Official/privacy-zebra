@@ -119,8 +119,8 @@ fn every_subcommand_runs_in_a_temporary_directory() {
     let verified = must(&directory, &["policy", "verify", "policy.json"]);
     assert!(verified.contains("verified     yes"));
 
-    // The mainnet encoding is refused rather than quietly producing a testnet address.
-    let refusal = must_refuse(
+    // The SWARM production encoding produces an `s3…` address, never a testnet one.
+    let mainnet = must(
         &directory,
         &[
             "policy",
@@ -141,8 +141,43 @@ fn every_subcommand_runs_in_a_temporary_directory() {
             "mainnet-policy.json",
         ],
     );
-    assert!(refusal.contains("not available in this build"), "{refusal}");
-    assert!(!directory.join("mainnet-policy.json").exists());
+    assert!(mainnet.contains("network      swarmmain"), "{mainnet}");
+    assert!(
+        mainnet
+            .lines()
+            .any(|line| line.starts_with("address      s3")),
+        "a SwarmMain policy must print an s3 address, not a testnet one: {mainnet}",
+    );
+    assert!(
+        !mainnet.contains("address      t2"),
+        "a SwarmMain policy must never be handed a testnet address: {mainnet}",
+    );
+    assert!(directory.join("mainnet-policy.json").exists());
+
+    // An unknown network is still refused rather than guessed.
+    let refusal = must_refuse(
+        &directory,
+        &[
+            "policy",
+            "assemble",
+            "--fund",
+            "Core",
+            "--threshold",
+            "2",
+            "--network",
+            "mainnet",
+            "--public",
+            "A.public.json",
+            "--public",
+            "B.public.json",
+            "--public",
+            "C.public.json",
+            "--out",
+            "unknown-policy.json",
+        ],
+    );
+    assert!(refusal.contains("unknown network"), "{refusal}");
+    assert!(!directory.join("unknown-policy.json").exists());
 
     // A tampered policy file does not verify.
     let policy: serde_json::Value =

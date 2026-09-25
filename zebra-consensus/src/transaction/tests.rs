@@ -3586,29 +3586,38 @@ async fn swarm_and_upstream_domains_are_accepted_only_on_their_own_network() {
 
     let _init_guard = zebra_test::init();
 
-    // A testnet whose NU6.3 rules are in force from height 1, so the two networks differ only in
-    // their transaction domain and not in which rules apply at the height under test.
-    let upstream_network = Parameters::build()
-        .with_activation_heights(ConfiguredActivationHeights {
-            nu6_3: Some(1),
-            ..Default::default()
-        })
-        .expect("the activation heights are valid")
-        .to_network()
-        .expect("failed to build configured network");
+    // Both networks are exercised at a height where the NU6.3 rules are in force, so they differ
+    // only in their transaction domain. SwarmMain activates everything at height 1; the default
+    // Testnet has its own NU6.3 activation height, and height 1 there is pre-Overwinter, where no
+    // V5/V6 transaction may appear at all.
+    let upstream_network = Network::new_default_testnet();
+    let upstream_height = NetworkUpgrade::Nu6_3
+        .activation_height(&upstream_network)
+        .expect("the default Testnet activates NU6.3");
     let swarm_network = swarm_main::fixture::network();
 
     let upstream_domain = NetworkUpgrade::Nu6_3
         .branch_id()
         .expect("NU6.3 has an upstream domain");
 
-    // Each network, paired with the domain it accepts and the domain it must reject.
+    // Each network, the height its NU6.3 rules are in force at, the domain it accepts and the
+    // domain it must reject.
     let cases = [
-        (&swarm_network, SWARM_PRODUCTION_DOMAIN, upstream_domain),
-        (&upstream_network, upstream_domain, SWARM_PRODUCTION_DOMAIN),
+        (
+            &swarm_network,
+            Height(1),
+            SWARM_PRODUCTION_DOMAIN,
+            upstream_domain,
+        ),
+        (
+            &upstream_network,
+            upstream_height,
+            upstream_domain,
+            SWARM_PRODUCTION_DOMAIN,
+        ),
     ];
 
-    for (network, own_domain, foreign_domain) in cases {
+    for (network, height, own_domain, foreign_domain) in cases {
         for (label, domain, expect_ok) in [
             ("own", own_domain, true),
             ("foreign", foreign_domain, false),
@@ -3652,7 +3661,7 @@ async fn swarm_and_upstream_domains_are_accepted_only_on_their_own_network() {
                         transaction_hash: tx.hash(),
                         transaction: Arc::new(tx.clone()),
                         known_utxos: known_utxos.clone(),
-                        height: Height(1),
+                        height,
                         time: DateTime::<Utc>::MAX_UTC,
                     })
                     .map_ok(|rsp| rsp.tx_id)
@@ -3662,7 +3671,7 @@ async fn swarm_and_upstream_domains_are_accepted_only_on_their_own_network() {
                     .clone()
                     .oneshot(MempoolRequest {
                         transaction: tx.clone().into(),
-                        height: Height(1),
+                        height,
                     })
                     .map_ok(|rsp| rsp.transaction.transaction.id)
                     .map_err(|e| format!("{e}"));
@@ -3720,7 +3729,7 @@ async fn swarm_and_upstream_domains_are_accepted_only_on_their_own_network() {
                         transaction_hash: tx.hash(),
                         transaction: Arc::new(tx.clone()),
                         known_utxos: known_utxos.clone(),
-                        height: Height(1),
+                        height,
                         time: DateTime::<Utc>::MAX_UTC,
                     })
                     .map_err(|err| *err.downcast().expect("`TransactionError` type"))
@@ -3730,7 +3739,7 @@ async fn swarm_and_upstream_domains_are_accepted_only_on_their_own_network() {
                     .clone()
                     .oneshot(MempoolRequest {
                         transaction: tx.clone().into(),
-                        height: Height(1),
+                        height,
                     })
                     .map_err(|err| *err.downcast().expect("`TransactionError` type"))
                     .await;

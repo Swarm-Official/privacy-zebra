@@ -518,18 +518,47 @@ mod tests {
         assert!(assemble(Fund::Core, TreasuryNetwork::Testnet, 4, &signers).is_err());
     }
 
-    /// A `swarmmain` policy cannot be assembled in this build.
+    /// The same fixture scalars assemble into a SwarmMain policy: the same 2-of-3 script and the
+    /// same script hash, encoded as an `s3…` address.
+    ///
+    /// The script hash is the policy. It does not depend on the network, so a SwarmMain treasury
+    /// destination is the very same multisig the published testnet vector pins, re-encoded for a
+    /// chain whose address prefixes are disjoint from Zcash's in both directions.
     #[test]
-    fn swarmmain_policies_are_refused() {
+    fn swarmmain_policies_encode_the_published_script_hash_as_an_s3_address() {
         let signers = vec![
             fixture_public("A", FIXTURE_KEYS[0]),
             fixture_public("B", FIXTURE_KEYS[1]),
             fixture_public("C", FIXTURE_KEYS[2]),
         ];
-        let error = assemble(Fund::Core, TreasuryNetwork::SwarmMain, 2, &signers)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not available in this build"), "{error}");
+        let policy = assemble(Fund::Core, TreasuryNetwork::SwarmMain, 2, &signers)
+            .expect("SwarmMain policy");
+        let testnet = fixture_policy();
+
+        // Same policy: same redeem script, same script hash as the published vector.
+        assert_eq!(policy.redeem_script, testnet.redeem_script);
+        assert_eq!(
+            policy.script_hash,
+            "15fc0754e73eb85d1cbce08786fadb7320ecb8dc"
+        );
+
+        // Different encoding: a SWARM production P2SH address, not a Zcash one.
+        assert!(
+            policy.address.starts_with("s3"),
+            "a SwarmMain treasury address must start with s3, found {}",
+            policy.address,
+        );
+        assert_ne!(policy.address, testnet.address);
+        assert_eq!(policy.network, "swarmmain");
+
+        // The fingerprint binds the network, so the two policies are not interchangeable.
+        assert_ne!(policy.policy_fingerprint, testnet.policy_fingerprint);
+
+        // And it round-trips back through the policy reader.
+        let derived =
+            derive_from_proposal(&policy.fund, &policy.network, &policy.redeem_script).unwrap();
+        assert_eq!(derived.policy.address, policy.address);
+        assert_eq!(derived.network, TreasuryNetwork::SwarmMain);
     }
 
     /// A policy derived from a proposal's fields has the same fingerprint, address and keys as the
