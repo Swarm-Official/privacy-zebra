@@ -1365,7 +1365,7 @@ fn transaction_v5_with_orchard_shielded_data(
     }
 
     Transaction::V5 {
-        network_upgrade: Nu5,
+        consensus_branch_id: Nu5.branch_id().expect("NU5 branch ID"),
         inputs: Vec::new(),
         outputs: Vec::new(),
         lock_time: LockTime::min_lock_time_timestamp(),

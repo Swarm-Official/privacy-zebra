@@ -589,6 +589,16 @@ impl<T: reddsa::SigType> ZcashDeserialize for reddsa::Signature<T> {
 impl ZcashSerialize for Transaction {
     #[allow(clippy::unwrap_in_result)]
     fn zcash_serialize<W: io::Write>(&self, mut writer: W) -> Result<(), io::Error> {
+        // Reject unknown domains before writing even the transaction header.
+        if let Some(branch_id) = self.consensus_branch_id() {
+            if NetworkUpgrade::try_from(u32::from(branch_id)).is_err() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unknown consensus branch ID",
+                ));
+            }
+        }
+
         // Post-Sapling, transaction size is limited to MAX_BLOCK_BYTES.
         // (Strictly, the maximum transaction size is about 1.5 kB less,
         // because blocks also include a block header.)
@@ -751,7 +761,7 @@ impl ZcashSerialize for Transaction {
             }
 
             Transaction::V5 {
-                network_upgrade,
+                consensus_branch_id,
                 lock_time,
                 expiry_height,
                 inputs,
@@ -766,11 +776,7 @@ impl ZcashSerialize for Transaction {
                 writer.write_u32::<LittleEndian>(TX_V5_VERSION_GROUP_ID)?;
 
                 // Denoted as `nConsensusBranchId` in the spec.
-                writer.write_u32::<LittleEndian>(u32::from(
-                    network_upgrade
-                        .branch_id()
-                        .expect("valid transactions must have a network upgrade with a branch id"),
-                ))?;
+                writer.write_u32::<LittleEndian>(u32::from(*consensus_branch_id))?;
 
                 // Denoted as `lock_time` in the spec.
                 lock_time.zcash_serialize(&mut writer)?;
@@ -797,7 +803,7 @@ impl ZcashSerialize for Transaction {
             }
 
             Transaction::V6 {
-                network_upgrade,
+                consensus_branch_id,
                 lock_time,
                 expiry_height,
                 inputs,
@@ -813,11 +819,7 @@ impl ZcashSerialize for Transaction {
                 writer.write_u32::<LittleEndian>(TX_V6_VERSION_GROUP_ID)?;
 
                 // Denoted as `nConsensusBranchId` in the spec.
-                writer.write_u32::<LittleEndian>(u32::from(
-                    network_upgrade
-                        .branch_id()
-                        .expect("valid transactions must have a network upgrade with a branch id"),
-                ))?;
+                writer.write_u32::<LittleEndian>(u32::from(*consensus_branch_id))?;
 
                 // Denoted as `lock_time` in the spec.
                 lock_time.zcash_serialize(&mut writer)?;
@@ -1082,9 +1084,9 @@ impl ZcashDeserialize for Transaction {
                     return Err(SerializationError::Parse("expected TX_V5_VERSION_GROUP_ID"));
                 }
                 // Denoted as `nConsensusBranchId` in the spec.
-                // Convert it to a NetworkUpgrade
-                let network_upgrade =
-                    NetworkUpgrade::try_from(limited_reader.read_u32::<LittleEndian>()?)?;
+                let consensus_branch_id =
+                    ConsensusBranchId::from(limited_reader.read_u32::<LittleEndian>()?);
+                let network_upgrade = NetworkUpgrade::try_from(u32::from(consensus_branch_id))?;
 
                 // # Consensus
                 //
@@ -1126,7 +1128,7 @@ impl ZcashDeserialize for Transaction {
                 let orchard_shielded_data = (&mut limited_reader).zcash_deserialize_into()?;
 
                 let tx = Transaction::V5 {
-                    network_upgrade,
+                    consensus_branch_id,
                     lock_time,
                     expiry_height,
                     inputs,
@@ -1146,9 +1148,9 @@ impl ZcashDeserialize for Transaction {
                     return Err(SerializationError::Parse("expected TX_V6_VERSION_GROUP_ID"));
                 }
                 // Denoted as `nConsensusBranchId` in the spec.
-                // Convert it to a NetworkUpgrade
-                let network_upgrade =
-                    NetworkUpgrade::try_from(limited_reader.read_u32::<LittleEndian>()?)?;
+                let consensus_branch_id =
+                    ConsensusBranchId::from(limited_reader.read_u32::<LittleEndian>()?);
+                let network_upgrade = NetworkUpgrade::try_from(u32::from(consensus_branch_id))?;
                 // v6 transactions are only valid from NU6.3 onward, so reject transactions with
                 // pre-NU6.3 consensus branch IDs at the wire layer. (The exact tx-vs-block network
                 // upgrade match is also re-checked during verification by `consensus_branch_id`.)
@@ -1198,7 +1200,7 @@ impl ZcashDeserialize for Transaction {
                     .zcash_deserialize_into::<Option<ironwood::ShieldedData>>()?;
 
                 let tx = Transaction::V6 {
-                    network_upgrade,
+                    consensus_branch_id,
                     lock_time,
                     expiry_height,
                     inputs,

@@ -24,7 +24,7 @@ use super::super::*;
 
 lazy_static! {
     pub static ref EMPTY_V5_TX: Transaction = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         lock_time: LockTime::min_lock_time_timestamp(),
         expiry_height: block::Height(0),
         inputs: Vec::new(),
@@ -1062,7 +1062,7 @@ fn v6_ironwood_txid_and_roundtrip() {
     let _init_guard = zebra_test::init();
 
     let tx = Transaction::V6 {
-        network_upgrade: NetworkUpgrade::Nu6_3,
+        consensus_branch_id: NetworkUpgrade::Nu6_3.branch_id().expect("NU6.3 branch ID"),
         lock_time: LockTime::min_lock_time_timestamp(),
         expiry_height: block::Height(0),
         inputs: Vec::new(),
@@ -1074,6 +1074,16 @@ fn v6_ironwood_txid_and_roundtrip() {
 
     // Drives the librustzcash Ironwood fork's v6 digest computation.
     let txid = tx.hash();
+    assert_eq!(
+        txid.to_string(),
+        "f90614f14c1cfd89a607d5334e2e4107d092b7063abe174c246924bb700bcc91",
+        "V6 txid must match the c4e0a4b baseline"
+    );
+    assert_eq!(
+        tx.auth_digest().expect("V6 authorizing digest").to_string(),
+        "cbaf0aab342237179af081612fa1d4a079677000854a6ea8be6ac9481d383038",
+        "V6 auth digest must match the c4e0a4b baseline"
+    );
 
     // The v6 wire format round-trips through Zebra's own (de)serializer.
     let bytes = tx
@@ -1085,6 +1095,174 @@ fn v6_ironwood_txid_and_roundtrip() {
 
     assert_eq!(tx, tx2);
     assert_eq!(tx2.hash(), txid, "txid is stable across serialization");
+}
+
+#[test]
+fn v5_v6_raw_branch_ids_round_trip() {
+    let _init_guard = zebra_test::init();
+
+    let mut v5_nu6 = EMPTY_V5_TX.clone();
+    v5_nu6
+        .update_network_upgrade(NetworkUpgrade::Nu6)
+        .expect("NU6 has a branch ID");
+    let transactions = [
+        EMPTY_V5_TX.clone(),
+        v5_nu6,
+        arbitrary::fake_v6_transaction(NetworkUpgrade::Nu6_3, None, None),
+    ];
+
+    for tx in transactions {
+        let bytes = tx.zcash_serialize_to_vec().expect("known ID serializes");
+        let raw = u32::from_le_bytes(bytes[8..12].try_into().expect("branch ID bytes"));
+        let decoded: Transaction = bytes
+            .as_slice()
+            .zcash_deserialize_into()
+            .expect("known transaction deserializes");
+        assert_eq!(
+            decoded.consensus_branch_id(),
+            Some(ConsensusBranchId::from(raw))
+        );
+        assert_eq!(decoded.network_upgrade(), tx.network_upgrade());
+        assert_eq!(decoded.zcash_serialize_to_vec().expect("re-encode"), bytes);
+    }
+}
+
+#[test]
+fn unknown_and_pre_version_branch_ids_fail_at_the_wire() {
+    let _init_guard = zebra_test::init();
+    let unknown = 0xdead_beef;
+    assert!(NetworkUpgrade::try_from(unknown).is_err());
+
+    for (tx, historical_upgrade) in [
+        (EMPTY_V5_TX.clone(), NetworkUpgrade::Canopy),
+        (
+            arbitrary::fake_v6_transaction(NetworkUpgrade::Nu6_3, None, None),
+            NetworkUpgrade::Nu5,
+        ),
+    ] {
+        let original = tx.zcash_serialize_to_vec().expect("fixture serializes");
+        for raw in [
+            unknown,
+            u32::from(
+                historical_upgrade
+                    .branch_id()
+                    .expect("historical branch ID"),
+            ),
+        ] {
+            let mut bytes = original.clone();
+            bytes[8..12].copy_from_slice(&raw.to_le_bytes());
+            assert!(
+                bytes
+                    .as_slice()
+                    .zcash_deserialize_into::<Transaction>()
+                    .is_err(),
+                "invalid wire branch ID {raw:08x} must be rejected"
+            );
+        }
+
+        // A known historical ID is still emitted exactly as stored, even when
+        // its transaction-version pairing is rejected by the decoder.
+        let mut historical = tx.clone();
+        match &mut historical {
+            Transaction::V5 {
+                consensus_branch_id,
+                ..
+            }
+            | Transaction::V6 {
+                consensus_branch_id,
+                ..
+            } => *consensus_branch_id = historical_upgrade.branch_id().expect("branch ID"),
+            _ => unreachable!("only V5 and V6 fixtures"),
+        }
+        let historical_bytes = historical
+            .zcash_serialize_to_vec()
+            .expect("recognized historical ID serializes");
+        assert_eq!(
+            &historical_bytes[8..12],
+            &u32::from(historical_upgrade.branch_id().expect("branch ID")).to_le_bytes()
+        );
+        assert!(historical_bytes
+            .as_slice()
+            .zcash_deserialize_into::<Transaction>()
+            .is_err());
+    }
+}
+
+#[test]
+fn unknown_internal_branch_id_fails_without_output_or_fallback() {
+    let _init_guard = zebra_test::init();
+    let unknown = ConsensusBranchId::from(0xdead_beef);
+    assert!(NetworkUpgrade::try_from(u32::from(unknown)).is_err());
+
+    for (mut tx, expected_upgrade) in [
+        (EMPTY_V5_TX.clone(), NetworkUpgrade::Nu5),
+        (
+            arbitrary::fake_v6_transaction(NetworkUpgrade::Nu6_3, None, None),
+            NetworkUpgrade::Nu6_3,
+        ),
+    ] {
+        match &mut tx {
+            Transaction::V5 {
+                consensus_branch_id,
+                ..
+            }
+            | Transaction::V6 {
+                consensus_branch_id,
+                ..
+            } => *consensus_branch_id = unknown,
+            _ => unreachable!("only V5 and V6 fixtures"),
+        }
+
+        assert_eq!(tx.consensus_branch_id(), Some(unknown));
+        assert_eq!(tx.network_upgrade(), None);
+        let mut bytes = Vec::new();
+        let error = tx
+            .zcash_serialize(&mut bytes)
+            .expect_err("unknown ID rejects");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            bytes.is_empty(),
+            "unknown ID must reject before writing bytes"
+        );
+        assert!(matches!(
+            tx.to_librustzcash(expected_upgrade),
+            Err(crate::Error::InvalidConsensusBranchId)
+        ));
+    }
+}
+
+#[test]
+fn branch_mutation_updates_raw_and_derived_upgrade() {
+    let mut tx = EMPTY_V5_TX.clone();
+    tx.update_network_upgrade(NetworkUpgrade::Nu6)
+        .expect("NU6 has a branch ID");
+    assert_eq!(tx.consensus_branch_id(), NetworkUpgrade::Nu6.branch_id());
+    assert_eq!(tx.network_upgrade(), Some(NetworkUpgrade::Nu6));
+
+    let before = tx.consensus_branch_id();
+    assert!(tx.update_network_upgrade(NetworkUpgrade::Genesis).is_err());
+    assert_eq!(tx.consensus_branch_id(), before);
+    assert_eq!(tx.network_upgrade(), Some(NetworkUpgrade::Nu6));
+    assert!(matches!(
+        tx.to_librustzcash(NetworkUpgrade::Nu5),
+        Err(crate::Error::InvalidConsensusBranchId)
+    ));
+}
+
+#[cfg(feature = "json-conversion")]
+#[test]
+fn v5_v6_json_keeps_network_upgrade_name_and_value() {
+    let v5 = serde_json::to_value(EMPTY_V5_TX.clone()).expect("V5 JSON");
+    let v6 = serde_json::to_value(arbitrary::fake_v6_transaction(
+        NetworkUpgrade::Nu6_3,
+        None,
+        None,
+    ))
+    .expect("V6 JSON");
+    assert_eq!(v5["V5"]["network_upgrade"], "NU5");
+    assert_eq!(v6["V6"]["network_upgrade"], "NU6.3");
+    assert!(v5["V5"].get("consensus_branch_id").is_none());
+    assert!(v6["V6"].get("consensus_branch_id").is_none());
 }
 
 /// A v6 transaction carrying populated Orchard-v6 and Ironwood bundles round-trips through Zebra's
@@ -1261,7 +1439,7 @@ fn orchard_rk_identity_point() {
     };
 
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         lock_time: LockTime::unlocked(),
         expiry_height: Height(0),
         inputs: vec![],
@@ -1328,7 +1506,7 @@ fn coinbase_v5_with_sapling_spends_deserializes_successfully() {
         sapling_shielded_data.expect("converted V5 must retain Sapling shielded data with spends");
 
     let coinbase_tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         lock_time,
         expiry_height,
         inputs: vec![transparent::Input::Coinbase {

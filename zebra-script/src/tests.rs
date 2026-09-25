@@ -278,7 +278,7 @@ fn build_and_verify_v5_p2pkh(
     // For v5/ZIP-244, the sighash does NOT depend on the unlock script contents,
     // so we can compute the sighash with a placeholder, sign, then rebuild.
     let placeholder_tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         lock_time: LockTime::unlocked(),
         expiry_height: block::Height(0),
         inputs: vec![transparent::Input::PrevOut {
@@ -321,7 +321,7 @@ fn build_and_verify_v5_p2pkh(
 
     // Rebuild the V5 transaction with the real unlock script
     let final_tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         lock_time: LockTime::unlocked(),
         expiry_height: block::Height(0),
         inputs: vec![transparent::Input::PrevOut {
@@ -479,7 +479,7 @@ fn build_and_verify_v5_p2pkh_single_with_missing_output(
     // Two inputs, one output: any input at index >= 1 has no corresponding
     // output for SIGHASH_SINGLE.
     let make_tx = |unlock_scripts: [Vec<u8>; 2]| Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         lock_time: LockTime::unlocked(),
         expiry_height: block::Height(0),
         inputs: vec![
@@ -885,7 +885,7 @@ fn count_coinbase_legacy_sigops_includes_coinbase_script() -> Result<()> {
         .expect("NU5 has a Mainnet activation height");
 
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![transparent::Input::Coinbase {
             height,
             data: miner_data,
@@ -971,7 +971,7 @@ fn p2sh_sigop_count_counts_redeem_script() -> Result<()> {
     };
 
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![input],
         outputs: vec![spent_output.clone()],
         lock_time: LockTime::unlocked(),
@@ -1052,7 +1052,7 @@ fn p2sh_sigop_count_matches_zcashd_when_redeem_script_contains_disabled_opcode()
     };
 
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![input],
         outputs: vec![spent_output.clone()],
         lock_time: LockTime::unlocked(),
@@ -1108,7 +1108,7 @@ fn p2sh_sigop_count_is_zero_for_non_p2sh_and_coinbase() -> Result<()> {
     let dummy_output_script = transparent::Script::new(&[0x51]);
     let output_amount = zebra_chain::amount::Amount::try_from(1_000_000)?;
     let coinbase_tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![transparent::Input::Coinbase {
             height: nu5_height,
             data: vec![OP_CHECKSIG; 80],
@@ -1148,7 +1148,7 @@ fn p2sh_sigop_count_is_zero_for_non_p2sh_and_coinbase() -> Result<()> {
         lock_script: p2pkh_lock,
     };
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![input],
         outputs: vec![],
         lock_time: LockTime::unlocked(),
@@ -1198,7 +1198,7 @@ fn block_sigop_total_includes_coinbase_and_p2sh() -> Result<()> {
     let dummy_output_script = transparent::Script::new(&[0x51]); // OP_TRUE
     let output_amount = zebra_chain::amount::Amount::try_from(1_000_000)?;
     let coinbase_tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![transparent::Input::Coinbase {
             height: nu5_height,
             data: vec![OP_CHECKSIG; 80],
@@ -1243,7 +1243,7 @@ fn block_sigop_total_includes_coinbase_and_p2sh() -> Result<()> {
         lock_script,
     };
     let p2sh_tx_template = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![p2sh_input],
         outputs: vec![],
         lock_time: LockTime::unlocked(),
@@ -1414,7 +1414,7 @@ fn stale_sighash_buffer_v5_two_checksig_rejected() {
     // does not depend on the unlock script contents, so we can sign, then
     // rebuild the transaction with the real unlock script.
     let placeholder_tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         lock_time: LockTime::unlocked(),
         expiry_height: block::Height(0),
         inputs: vec![transparent::Input::PrevOut {
@@ -1459,7 +1459,7 @@ fn stale_sighash_buffer_v5_two_checksig_rejected() {
     unlock_script_bytes.push(0x01);
 
     let final_tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         lock_time: LockTime::unlocked(),
         expiry_height: block::Height(0),
         inputs: vec![transparent::Input::PrevOut {
@@ -1514,7 +1514,7 @@ fn p2sh_sigop_count_uses_accurate_multisig_mode() -> Result<()> {
     lock.push(0x87u8);
 
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![transparent::Input::PrevOut {
             outpoint: transparent::OutPoint {
                 hash: transaction::Hash([0u8; 32]),
@@ -1607,7 +1607,7 @@ fn poc_p2sh_accurate_multisig_should_count_one_not_twenty() -> Result<()> {
     };
 
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs: vec![input],
         outputs: vec![transparent::Output {
             value: zebra_chain::amount::Amount::try_from(1_000_000)?,
@@ -1661,7 +1661,7 @@ fn poc_p2sh_1001_accurate_multisigs_should_stay_below_block_sigop_limit() -> Res
     let spent_outputs = vec![spent_output; SPENDS];
 
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("NU5 branch ID"),
         inputs,
         outputs: vec![transparent::Output {
             value: zebra_chain::amount::Amount::try_from(1_000_000)?,

@@ -316,7 +316,7 @@ fn mock_transparent_transaction(
             expiry_height,
             sapling_shielded_data: None,
             orchard_shielded_data: None,
-            network_upgrade,
+            consensus_branch_id: network_upgrade.branch_id().expect("transaction branch ID"),
         },
         6 => Transaction::V6 {
             inputs,
@@ -326,7 +326,7 @@ fn mock_transparent_transaction(
             sapling_shielded_data: None,
             orchard_shielded_data: None,
             ironwood_shielded_data: None,
-            network_upgrade,
+            consensus_branch_id: network_upgrade.branch_id().expect("transaction branch ID"),
         },
         invalid_version => unreachable!("invalid transaction version: {}", invalid_version),
     };

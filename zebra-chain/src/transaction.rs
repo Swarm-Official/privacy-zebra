@@ -42,8 +42,8 @@ use crate::{
     amount::{Amount, Error as AmountError, NegativeAllowed, NonNegative},
     block, ironwood, orchard,
     parameters::{
-        Network, NetworkUpgrade, OVERWINTER_VERSION_GROUP_ID, SAPLING_VERSION_GROUP_ID,
-        TX_V5_VERSION_GROUP_ID,
+        ConsensusBranchId, Network, NetworkUpgrade, OVERWINTER_VERSION_GROUP_ID,
+        SAPLING_VERSION_GROUP_ID, TX_V5_VERSION_GROUP_ID,
     },
     primitives::{ed25519, Bctv14Proof, Groth16Proof},
     sapling,
@@ -128,10 +128,15 @@ pub enum Transaction {
     },
     /// A `version = 5` transaction , which supports Orchard, Sapling, and transparent, but not Sprout.
     V5 {
-        /// The Network Upgrade for this transaction.
-        ///
-        /// Derived from the ConsensusBranchId field.
-        network_upgrade: NetworkUpgrade,
+        /// The raw consensus branch ID encoded in this transaction.
+        #[cfg_attr(
+            any(test, feature = "proptest-impl", feature = "elasticsearch"),
+            serde(
+                rename = "network_upgrade",
+                serialize_with = "serialize_upgrade_from_branch_id"
+            )
+        )]
+        consensus_branch_id: ConsensusBranchId,
         /// The earliest time or block height that this transaction can be added to the
         /// chain.
         lock_time: LockTime,
@@ -148,10 +153,15 @@ pub enum Transaction {
     },
     /// A `version = 6` transaction, which is reserved for current development.
     V6 {
-        /// The Network Upgrade for this transaction.
-        ///
-        /// Derived from the ConsensusBranchId field.
-        network_upgrade: NetworkUpgrade,
+        /// The raw consensus branch ID encoded in this transaction.
+        #[cfg_attr(
+            any(test, feature = "proptest-impl", feature = "elasticsearch"),
+            serde(
+                rename = "network_upgrade",
+                serialize_with = "serialize_upgrade_from_branch_id"
+            )
+        )]
+        consensus_branch_id: ConsensusBranchId,
         /// The earliest time or block height that this transaction can be added to the
         /// chain.
         lock_time: LockTime,
@@ -176,6 +186,16 @@ pub enum Transaction {
         /// [`ironwood::ShieldedData`] newtype.
         ironwood_shielded_data: Option<ironwood::ShieldedData>,
     },
+}
+
+#[cfg(any(test, feature = "proptest-impl", feature = "elasticsearch"))]
+fn serialize_upgrade_from_branch_id<S: serde::Serializer>(
+    branch_id: &ConsensusBranchId,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let upgrade =
+        NetworkUpgrade::try_from(u32::from(*branch_id)).map_err(serde::ser::Error::custom)?;
+    serde::Serialize::serialize(&upgrade, serializer)
 }
 
 impl fmt::Display for Transaction {
@@ -530,8 +550,7 @@ impl Transaction {
         }
     }
 
-    /// Get this transaction's network upgrade field, if any.
-    /// This field is serialized as `nConsensusBranchId` ([7.1]).
+    /// Get the recognized network upgrade derived from this transaction's branch ID.
     ///
     /// [7.1]: https://zips.z.cash/protocol/nu5.pdf#txnencodingandconsensus
     pub fn network_upgrade(&self) -> Option<NetworkUpgrade> {
@@ -541,11 +560,31 @@ impl Transaction {
             | Transaction::V3 { .. }
             | Transaction::V4 { .. } => None,
             Transaction::V5 {
-                network_upgrade, ..
-            } => Some(*network_upgrade),
-            Transaction::V6 {
-                network_upgrade, ..
-            } => Some(*network_upgrade),
+                consensus_branch_id,
+                ..
+            }
+            | Transaction::V6 {
+                consensus_branch_id,
+                ..
+            } => NetworkUpgrade::try_from(u32::from(*consensus_branch_id)).ok(),
+        }
+    }
+
+    /// Return the raw `nConsensusBranchId` stored by V5 and V6 transactions.
+    pub fn consensus_branch_id(&self) -> Option<ConsensusBranchId> {
+        match self {
+            Transaction::V1 { .. }
+            | Transaction::V2 { .. }
+            | Transaction::V3 { .. }
+            | Transaction::V4 { .. } => None,
+            Transaction::V5 {
+                consensus_branch_id,
+                ..
+            }
+            | Transaction::V6 {
+                consensus_branch_id,
+                ..
+            } => Some(*consensus_branch_id),
         }
     }
 
@@ -1576,19 +1615,22 @@ impl Transaction {
 
     /// Converts [`Transaction`] to [`zcash_primitives::transaction::Transaction`].
     ///
-    /// If the tx contains a network upgrade, this network upgrade must match the passed `nu`. The
-    /// passed `nu` must also contain a consensus branch id convertible to its `librustzcash`
-    /// equivalent.
+    /// For V5/V6, the stored branch ID must equal the ID expected from `nu`.
+    /// The branch ID must also be recognized by the protocol reader.
     pub(crate) fn to_librustzcash(
         &self,
         nu: NetworkUpgrade,
     ) -> Result<zcash_primitives::transaction::Transaction, crate::Error> {
-        if self.network_upgrade().is_some_and(|tx_nu| tx_nu != nu) {
+        let Some(expected_branch_id) = nu.branch_id() else {
             return Err(crate::Error::InvalidConsensusBranchId);
-        }
+        };
 
-        let Some(branch_id) = nu.branch_id() else {
-            return Err(crate::Error::InvalidConsensusBranchId);
+        let branch_id = match self.consensus_branch_id() {
+            Some(actual_branch_id) if actual_branch_id != expected_branch_id => {
+                return Err(crate::Error::InvalidConsensusBranchId);
+            }
+            Some(actual_branch_id) => actual_branch_id,
+            None => expected_branch_id,
         };
 
         let Ok(branch_id) = consensus::BranchId::try_from(branch_id) else {
@@ -1631,6 +1673,9 @@ impl Transaction {
     ///
     /// - Updating the network upgrade for V1, V2, V3 and V4 transactions is not possible.
     pub fn update_network_upgrade(&mut self, nu: NetworkUpgrade) -> Result<(), &str> {
+        let branch_id = nu
+            .branch_id()
+            .ok_or("network upgrade has no consensus branch ID")?;
         match self {
             Transaction::V1 { .. }
             | Transaction::V2 { .. }
@@ -1639,17 +1684,17 @@ impl Transaction {
                 "Updating the network upgrade for V1, V2, V3 and V4 transactions is not possible.",
             ),
             Transaction::V5 {
-                ref mut network_upgrade,
+                ref mut consensus_branch_id,
                 ..
             } => {
-                *network_upgrade = nu;
+                *consensus_branch_id = branch_id;
                 Ok(())
             }
             Transaction::V6 {
-                ref mut network_upgrade,
+                ref mut consensus_branch_id,
                 ..
             } => {
-                *network_upgrade = nu;
+                *consensus_branch_id = branch_id;
                 Ok(())
             }
         }

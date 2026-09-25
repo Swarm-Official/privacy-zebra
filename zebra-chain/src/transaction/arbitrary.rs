@@ -153,11 +153,15 @@ impl Transaction {
                     orchard_shielded_data,
                 )| {
                     Transaction::V5 {
-                        network_upgrade: if ledger_state.transaction_has_valid_network_upgrade() {
-                            ledger_state.network_upgrade()
-                        } else {
-                            network_upgrade
-                        },
+                        consensus_branch_id:
+                            if ledger_state.transaction_has_valid_network_upgrade() {
+                                ledger_state.network_upgrade()
+                            } else {
+                                network_upgrade
+                            }
+                            .branch_id()
+                            .or_else(|| network_upgrade.branch_id())
+                            .expect("V5 strategy upgrades have branch IDs"),
                         lock_time,
                         expiry_height,
                         inputs,
@@ -204,11 +208,15 @@ impl Transaction {
                     ironwood_shielded_data,
                 )| {
                     Transaction::V6 {
-                        network_upgrade: if ledger_state.transaction_has_valid_network_upgrade() {
-                            ledger_state.network_upgrade()
-                        } else {
-                            network_upgrade
-                        },
+                        consensus_branch_id:
+                            if ledger_state.transaction_has_valid_network_upgrade() {
+                                ledger_state.network_upgrade()
+                            } else {
+                                network_upgrade
+                            }
+                            .branch_id()
+                            .or_else(|| network_upgrade.branch_id())
+                            .expect("V6 strategy upgrades have branch IDs"),
                         lock_time,
                         expiry_height,
                         inputs,
@@ -1012,7 +1020,7 @@ pub fn transaction_to_fake_v5(
             outputs,
             lock_time,
         } => V5 {
-            network_upgrade: block_nu,
+            consensus_branch_id: block_nu.branch_id().expect("block upgrade has a branch ID"),
             inputs: inputs.to_vec(),
             outputs: outputs.to_vec(),
             lock_time: *lock_time,
@@ -1026,7 +1034,7 @@ pub fn transaction_to_fake_v5(
             lock_time,
             ..
         } => V5 {
-            network_upgrade: block_nu,
+            consensus_branch_id: block_nu.branch_id().expect("block upgrade has a branch ID"),
             inputs: inputs.to_vec(),
             outputs: outputs.to_vec(),
             lock_time: *lock_time,
@@ -1040,7 +1048,7 @@ pub fn transaction_to_fake_v5(
             lock_time,
             ..
         } => V5 {
-            network_upgrade: block_nu,
+            consensus_branch_id: block_nu.branch_id().expect("block upgrade has a branch ID"),
             inputs: inputs.to_vec(),
             outputs: outputs.to_vec(),
             lock_time: *lock_time,
@@ -1055,7 +1063,7 @@ pub fn transaction_to_fake_v5(
             sapling_shielded_data,
             ..
         } => V5 {
-            network_upgrade: block_nu,
+            consensus_branch_id: block_nu.branch_id().expect("block upgrade has a branch ID"),
             inputs: inputs.to_vec(),
             outputs: outputs.to_vec(),
             lock_time: *lock_time,
@@ -1263,7 +1271,9 @@ pub fn fake_v6_transaction(
     ironwood_shielded_data: Option<crate::ironwood::ShieldedData>,
 ) -> Transaction {
     Transaction::V6 {
-        network_upgrade,
+        consensus_branch_id: network_upgrade
+            .branch_id()
+            .expect("fake V6 transaction upgrade has a branch ID"),
         lock_time: LockTime::unlocked(),
         expiry_height: block::Height(0),
         inputs: Vec::new(),

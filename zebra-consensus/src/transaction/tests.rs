@@ -243,7 +243,7 @@ fn orchard_value_balance_frozen_at_nu6_3() {
         expiry_height: Height(0),
         sapling_shielded_data: None,
         orchard_shielded_data: None,
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
     };
     assert!(check::orchard_value_balance_non_negative(
         &no_orchard_tx,
@@ -436,7 +436,7 @@ fn v5_transaction_with_no_inputs_fails_verification() {
             expiry_height: NetworkUpgrade::Nu5.activation_height(&net).expect("height"),
             sapling_shielded_data: None,
             orchard_shielded_data: None,
-            network_upgrade: NetworkUpgrade::Nu5,
+            consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
         };
 
         assert_eq!(
@@ -463,7 +463,7 @@ fn v5_transaction_with_no_outputs_fails_verification() {
             expiry_height: NetworkUpgrade::Nu5.activation_height(&net).expect("height"),
             sapling_shielded_data: None,
             orchard_shielded_data: None,
-            network_upgrade: NetworkUpgrade::Nu5,
+            consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
         };
 
         assert_eq!(
@@ -1014,7 +1014,7 @@ async fn block_verification_does_not_use_mempool_verified_state() {
 
     // Create a non-coinbase V4 tx with the last valid expiry height.
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu6,
+        consensus_branch_id: NetworkUpgrade::Nu6.branch_id().expect("Nu6 branch ID"),
         inputs: vec![input],
         outputs: vec![output],
         lock_time: LockTime::min_lock_time_timestamp(),
@@ -1287,7 +1287,7 @@ async fn mempool_request_with_transparent_coinbase_spend_is_accepted_on_regtest(
 
     // Create a non-coinbase V5 tx with the last valid expiry height.
     let tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu6,
+        consensus_branch_id: NetworkUpgrade::Nu6.branch_id().expect("Nu6 branch ID"),
         inputs: vec![input],
         outputs: vec![output],
         lock_time: LockTime::min_lock_time_timestamp(),
@@ -2189,7 +2189,7 @@ async fn v5_transaction_with_transparent_transfer_is_accepted() {
         expiry_height: (transaction_block_height + 1).expect("expiry height is too large"),
         sapling_shielded_data: None,
         orchard_shielded_data: None,
-        network_upgrade,
+        consensus_branch_id: network_upgrade.branch_id().expect("transaction branch ID"),
     };
 
     let transaction_hash = transaction.unmined_id();
@@ -2242,7 +2242,7 @@ async fn v5_transaction_with_last_valid_expiry_height() {
         expiry_height: block_height,
         sapling_shielded_data: None,
         orchard_shielded_data: None,
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
     };
 
     let result = verifier
@@ -2287,7 +2287,7 @@ async fn v5_coinbase_transaction_expiry_height() {
         expiry_height: block_height,
         sapling_shielded_data: None,
         orchard_shielded_data: None,
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
     };
 
     let result = verifier
@@ -2429,7 +2429,7 @@ async fn v5_transaction_with_too_low_expiry_height() {
         expiry_height,
         sapling_shielded_data: None,
         orchard_shielded_data: None,
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
     };
 
     let result = verifier
@@ -2477,7 +2477,7 @@ async fn v5_transaction_with_exceeding_expiry_height() {
         expiry_height,
         sapling_shielded_data: None,
         orchard_shielded_data: None,
-        network_upgrade: NetworkUpgrade::Nu6_3,
+        consensus_branch_id: NetworkUpgrade::Nu6_3.branch_id().expect("Nu6_3 branch ID"),
     };
 
     let transaction_hash = transaction.hash();
@@ -2522,7 +2522,7 @@ async fn v5_coinbase_transaction_is_accepted() {
 
     // Create a V5 coinbase transaction
     let transaction = Transaction::V5 {
-        network_upgrade,
+        consensus_branch_id: network_upgrade.branch_id().expect("transaction branch ID"),
         inputs: vec![input],
         outputs: vec![output],
         lock_time: LockTime::Height(block::Height(0)),
@@ -2588,7 +2588,7 @@ async fn v5_transaction_with_transparent_transfer_is_rejected_by_the_script() {
         expiry_height: (transaction_block_height + 1).expect("expiry height is too large"),
         sapling_shielded_data: None,
         orchard_shielded_data: None,
-        network_upgrade,
+        consensus_branch_id: network_upgrade.branch_id().expect("transaction branch ID"),
     };
 
     let state_service =
@@ -2639,7 +2639,9 @@ async fn v5_transaction_with_conflicting_transparent_spend_is_rejected() {
             expiry_height: height.next().expect("valid height"),
             sapling_shielded_data: None,
             orchard_shielded_data: None,
-            network_upgrade: NetworkUpgrade::Canopy,
+            consensus_branch_id: NetworkUpgrade::Canopy
+                .branch_id()
+                .expect("Canopy branch ID"),
         };
 
         let state = service_fn(|_| async { unreachable!("State service should not be called") });
@@ -3424,7 +3426,7 @@ async fn v5_consensus_branch_ids() {
         expiry_height: Height::MAX_EXPIRY_HEIGHT,
         sapling_shielded_data: None,
         orchard_shielded_data: None,
-        network_upgrade,
+        consensus_branch_id: network_upgrade.branch_id().expect("transaction branch ID"),
     };
 
     let outpoint = match tx.inputs()[0] {
@@ -4102,7 +4104,7 @@ async fn mempool_zip317_error() {
         inputs: vec![input],
         outputs: vec![output],
         lock_time: LockTime::unlocked(),
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
         expiry_height: height,
         sapling_shielded_data: None,
         orchard_shielded_data: None,
@@ -4166,7 +4168,7 @@ async fn mempool_zip317_ok() {
         inputs: vec![input],
         outputs: vec![output],
         lock_time: LockTime::unlocked(),
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
         expiry_height: height,
         sapling_shielded_data: None,
         orchard_shielded_data: None,
@@ -4245,7 +4247,7 @@ async fn block_with_garbage_orchard_proofs_is_rejected() {
     );
 
     let mut tx = Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu6,
+        consensus_branch_id: NetworkUpgrade::Nu6.branch_id().expect("Nu6 branch ID"),
         inputs: vec![input],
         outputs: vec![output],
         lock_time: LockTime::min_lock_time_timestamp(),
@@ -4404,7 +4406,7 @@ fn mempool_standard_input_scripts_limits_p2sh_redeem_sigops() {
     };
 
     let tx_spending = |unlock_bytes: &[u8]| Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
         inputs: vec![transparent::Input::PrevOut {
             outpoint: transparent::OutPoint {
                 hash: Hash([0u8; 32]),
@@ -4446,7 +4448,7 @@ fn mempool_standard_input_scripts_rejects_nonstandard_spent_output() {
     let _init_guard = zebra_test::init();
 
     let tx_spending = |unlock_bytes: &[u8], spent_output: &transparent::Output| Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
         inputs: vec![transparent::Input::PrevOut {
             outpoint: transparent::OutPoint {
                 hash: Hash([0u8; 32]),
@@ -4511,7 +4513,7 @@ fn mempool_standard_input_scripts_rejects_nonstandard_script_sigs() {
     };
 
     let tx_spending = |unlock_bytes: &[u8]| Transaction::V5 {
-        network_upgrade: NetworkUpgrade::Nu5,
+        consensus_branch_id: NetworkUpgrade::Nu5.branch_id().expect("Nu5 branch ID"),
         inputs: vec![transparent::Input::PrevOut {
             outpoint: transparent::OutPoint {
                 hash: Hash([0u8; 32]),
