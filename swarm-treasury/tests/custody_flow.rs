@@ -904,6 +904,7 @@ fn digests_are_recomputed_from_the_raw_transaction() {
     let raw = hex::decode(&fixture.proposal.transaction).unwrap();
     let parsed: Transaction = raw.as_slice().zcash_deserialize_into().unwrap();
     let digests = spend::input_digests(
+        fixture.policy().network,
         &parsed,
         &checked.previous_outputs,
         &fixture.policy().redeem_script,

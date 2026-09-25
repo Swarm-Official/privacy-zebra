@@ -28,6 +28,7 @@ use zebra_chain::{
 use zebra_script::CachedFfiTransaction;
 
 use crate::{
+    network::TreasuryNetwork,
     policy::CheckedPolicy,
     refuse, script,
     shielded::{self, Pool, WireBundle, MEMO_LEN},
@@ -198,17 +199,24 @@ pub fn propose(request: ProposalRequest<'_>) -> Result<Proposal> {
         request.rng_seed,
         |placeholder| {
             let transaction = assemble_transaction(
+                policy.network,
                 request.pool,
                 &outpoints,
                 &empty_script_sigs,
                 expiry_height,
                 placeholder,
             )?;
-            shielded_sighash(&transaction, request.pool, &previous_outputs)
+            shielded_sighash(
+                policy.network,
+                &transaction,
+                request.pool,
+                &previous_outputs,
+            )
         },
     )?;
 
     let transaction = assemble_transaction(
+        policy.network,
         request.pool,
         &outpoints,
         &empty_script_sigs,
@@ -218,7 +226,12 @@ pub fn propose(request: ProposalRequest<'_>) -> Result<Proposal> {
 
     // Step 4: the ZIP-244 signature digest excludes the proof and the signatures, so filling them
     // in must not have moved the sighash. Everything below depends on that.
-    let authorized_sighash = shielded_sighash(&transaction, request.pool, &previous_outputs)?;
+    let authorized_sighash = shielded_sighash(
+        policy.network,
+        &transaction,
+        request.pool,
+        &previous_outputs,
+    )?;
     if authorized_sighash != placeholder_sighash {
         return Err(refuse!(
             "the shielded signature digest changed when the proof and signatures were filled in; \
@@ -246,6 +259,7 @@ pub fn propose(request: ProposalRequest<'_>) -> Result<Proposal> {
     }
 
     let digests = input_digests(
+        policy.network,
         &transaction,
         &previous_outputs,
         &policy.redeem_script,
@@ -484,7 +498,13 @@ pub fn check(proposal: &Proposal, policy: &CheckedPolicy) -> Result<CheckedPropo
         ));
     }
 
-    let digests = input_digests(&transaction, &previous_outputs, &policy.redeem_script, pool)?;
+    let digests = input_digests(
+        policy.network,
+        &transaction,
+        &previous_outputs,
+        &policy.redeem_script,
+        pool,
+    )?;
     for (index, (digest, input)) in digests.iter().zip(&proposal.inputs).enumerate() {
         if hex::encode(digest) != input.sighash_all_digest {
             return Err(refuse!(
@@ -858,10 +878,10 @@ pub fn combine(
 
     // The maintained script interpreter, on every input.
     let previous_outputs = Arc::new(checked.previous_outputs.clone());
-    let cached = CachedFfiTransaction::new(
+    let cached = CachedFfiTransaction::new_in(
         Arc::new(final_transaction.clone()),
         previous_outputs,
-        checked.pool.network_upgrade(),
+        &policy.network.consensus_context(checked.pool)?,
     )
     .map_err(|error| refuse!("the final transaction is not supported by its branch: {error}"))?;
     for index in 0..final_transaction.inputs().len() {
@@ -921,6 +941,7 @@ pub fn combine(
 /// The `outputs` field is always empty: this is the whole-UTXO, no-change policy, and there is no
 /// code path here that adds a transparent output.
 pub fn assemble_transaction(
+    network: TreasuryNetwork,
     pool: Pool,
     outpoints: &[OutPoint],
     script_sigs: &[Vec<u8>],
@@ -945,10 +966,10 @@ pub fn assemble_transaction(
         })
         .collect();
 
-    let consensus_branch_id = pool
-        .network_upgrade()
-        .branch_id()
-        .ok_or_else(|| refuse!("{} has no consensus branch id", pool.name()))?;
+    // The domain comes from the *network*, not from the network upgrade. SwarmMain runs the same
+    // NU6.3 rules as upstream under its own domain `0x53574d31`, so deriving it from the upgrade
+    // would build a SwarmMain spend that a SwarmMain node rejects and a Zcash node might accept.
+    let consensus_branch_id = network.consensus_context(pool)?.branch();
 
     Ok(match pool {
         Pool::V5Orchard => Transaction::V5 {
@@ -1032,12 +1053,14 @@ fn rebuild_with_script_sigs(
 
 /// The ZIP-244 signature digest the shielded bundle is bound to.
 fn shielded_sighash(
+    network: TreasuryNetwork,
     transaction: &Transaction,
     pool: Pool,
     previous_outputs: &[transparent::Output],
 ) -> Result<[u8; 32]> {
+    let ctx = network.consensus_context(pool)?;
     let sighasher = transaction
-        .sighasher(pool.network_upgrade(), Arc::new(previous_outputs.to_vec()))
+        .sighasher_in(&ctx, Arc::new(previous_outputs.to_vec()))
         .map_err(|error| refuse!("could not build the sighasher: {error}"))?;
     Ok(*sighasher.sighash(HashType::ALL, None).as_ref())
 }
@@ -1047,13 +1070,15 @@ fn shielded_sighash(
 /// The ZIP-244 transparent signature digest does not commit to the scriptSigs, so these are the
 /// same before and after signing — which is why a proposal can carry them.
 pub fn input_digests(
+    network: TreasuryNetwork,
     transaction: &Transaction,
     previous_outputs: &[transparent::Output],
     redeem_script: &[u8],
     pool: Pool,
 ) -> Result<Vec<[u8; 32]>> {
+    let ctx = network.consensus_context(pool)?;
     let sighasher = transaction
-        .sighasher(pool.network_upgrade(), Arc::new(previous_outputs.to_vec()))
+        .sighasher_in(&ctx, Arc::new(previous_outputs.to_vec()))
         .map_err(|error| refuse!("could not build the sighasher: {error}"))?;
 
     Ok((0..transaction.inputs().len())
