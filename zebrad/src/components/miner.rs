@@ -504,7 +504,8 @@ where
                     // We only need to check header equality, because the block data is bound to the
                     // header.
                     if has_changed
-                        && Some(old_header) != cancel_receiver.cloned_watch_data().map(|b| *b.header)
+                        && Some(old_header)
+                            != cancel_receiver.cloned_watch_data().map(|b| *b.header)
                     {
                         Err(SolverCancelled)
                     } else {
