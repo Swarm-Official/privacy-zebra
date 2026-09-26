@@ -102,6 +102,13 @@ pub struct Config {
     /// testnet.
     pub initial_testnet_peers: IndexSet<String>,
 
+    /// A list of initial peers for the peerset when operating on the SWARM production network.
+    ///
+    /// Empty by default: SWARM has no DNS seeders, and the upstream lists name Zcash seeders.
+    /// The first node of a new chain runs with this empty; every node after it names at least
+    /// one peer here, or reads one from the peer cache.
+    pub initial_swarm_main_peers: IndexSet<String>,
+
     /// An optional root directory for storing cached peer address data.
     ///
     /// # Configuration
@@ -252,8 +259,9 @@ impl Config {
             // Zcash DNS seeders, which would point a SWARM node at Zcash nodes. They would be
             // rejected at the version handshake because the network magic differs, but a node
             // that dials only foreign peers never finds its own network at all. SWARM peers come
-            // from `initial_peers` in the configuration, and from the on-disk peer cache.
-            Network::SwarmMain(_) => IndexSet::new(),
+            // from `initial_swarm_main_peers` in the configuration, and from the on-disk peer
+            // cache.
+            Network::SwarmMain(_) => self.initial_swarm_main_peers.clone(),
         }
     }
 
@@ -262,8 +270,12 @@ impl Config {
     ///
     /// Such a node is alone on its network by construction. It is the state a node is in while
     /// it bootstraps a brand-new chain, before any other node exists to peer with, which is
-    /// exactly the situation the first SWARM production node starts in: `initial_peer_hostnames`
-    /// is empty on `SwarmMain` by design, because the upstream lists name Zcash DNS seeders.
+    /// exactly the situation the first SWARM production node starts in: `SwarmMain` has no
+    /// built-in seed list, so `initial_swarm_main_peers` is empty until an operator names a
+    /// peer.
+    ///
+    /// The moment a peer *is* named — every node that joins the chain after the first — this is
+    /// `false` again, and the node waits to be close to the tip before it mines.
     pub fn has_no_peer_sources(&self) -> bool {
         self.initial_peer_hostnames().is_empty() && !self.cache_dir.is_enabled()
     }
@@ -593,6 +605,8 @@ impl Default for Config {
             network: Network::Mainnet,
             initial_mainnet_peers: mainnet_peers,
             initial_testnet_peers: testnet_peers,
+            // SWARM has no seeders to list.
+            initial_swarm_main_peers: IndexSet::new(),
             cache_dir: CacheDir::default(),
             crawl_new_peer_interval: DEFAULT_CRAWL_NEW_PEER_INTERVAL,
 
@@ -798,6 +812,12 @@ struct DConfig {
 
     initial_mainnet_peers: IndexSet<String>,
     initial_testnet_peers: IndexSet<String>,
+
+    /// The SWARM production seed peers. Skipped when empty, which it is on every network but
+    /// SwarmMain, so `zebrad generate` does not offer a Zcash operator a SWARM-only key.
+    #[serde(default, skip_serializing_if = "IndexSet::is_empty")]
+    initial_swarm_main_peers: IndexSet<String>,
+
     cache_dir: CacheDir,
     peerset_initial_target_size: usize,
     #[serde(alias = "new_peer_interval", with = "humantime_serde")]
@@ -824,6 +844,7 @@ impl Default for DConfig {
             testnet_parameters: None,
             initial_mainnet_peers: config.initial_mainnet_peers,
             initial_testnet_peers: config.initial_testnet_peers,
+            initial_swarm_main_peers: config.initial_swarm_main_peers,
             cache_dir: config.cache_dir,
             peerset_initial_target_size: config.peerset_initial_target_size,
             crawl_new_peer_interval: config.crawl_new_peer_interval,
@@ -883,6 +904,7 @@ impl From<Config> for DConfig {
             network,
             initial_mainnet_peers,
             initial_testnet_peers,
+            initial_swarm_main_peers,
             cache_dir,
             peerset_initial_target_size,
             crawl_new_peer_interval,
@@ -928,6 +950,7 @@ impl From<Config> for DConfig {
             testnet_parameters: None,
             initial_mainnet_peers,
             initial_testnet_peers,
+            initial_swarm_main_peers,
             cache_dir,
             peerset_initial_target_size,
             crawl_new_peer_interval,
@@ -949,6 +972,7 @@ impl<'de> Deserialize<'de> for Config {
             testnet_parameters,
             initial_mainnet_peers,
             initial_testnet_peers,
+            initial_swarm_main_peers,
             cache_dir,
             peerset_initial_target_size,
             crawl_new_peer_interval,
@@ -1043,6 +1067,7 @@ impl<'de> Deserialize<'de> for Config {
             network,
             initial_mainnet_peers,
             initial_testnet_peers,
+            initial_swarm_main_peers,
             cache_dir,
             peerset_initial_target_size,
             crawl_new_peer_interval,

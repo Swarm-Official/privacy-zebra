@@ -1,5 +1,6 @@
 //! Fixed test vectors for zebra-network configuration.
 
+use indexmap::IndexSet;
 use static_assertions::const_assert;
 use zebra_chain::{
     block::Height,
@@ -232,6 +233,69 @@ fn parse_complete_swarm_main_config() {
 
     // No upstream seed peers are used: the upstream lists name Zcash DNS seeders.
     assert!(config.initial_peer_hostnames().is_empty());
+}
+
+/// SwarmMain seed peers come from `initial_swarm_main_peers`, and naming one takes the node out
+/// of the "alone on its network" state that lets the first node of a new chain mine at once.
+///
+/// This is the difference between the node that starts the chain and every node that joins it:
+/// with a peer named, the miner waits until the syncer says it is close to the tip, so a joining
+/// node cannot mine onto a stale height it has not finished downloading.
+#[test]
+fn swarm_main_seed_peers_are_configurable() {
+    let _init_guard = zebra_test::init();
+
+    // The scalars go first: `SWARM_MAIN_CONFIG` ends inside a table.
+    let alone: Config = toml::from_str(&format!("cache_dir = false\n{SWARM_MAIN_CONFIG}"))
+        .expect("a complete config parses");
+    assert!(alone.initial_peer_hostnames().is_empty());
+    assert!(
+        alone.has_no_peer_sources(),
+        "a SwarmMain node with no seed list and no peer cache is alone on its network",
+    );
+
+    let joined: Config = toml::from_str(&format!(
+        "cache_dir = false\ninitial_swarm_main_peers = ['zebra:28233', '10.0.0.7:28233']\n\
+         {SWARM_MAIN_CONFIG}"
+    ))
+    .expect("a config naming SwarmMain peers parses");
+
+    assert_eq!(
+        joined.initial_peer_hostnames(),
+        ["zebra:28233".to_string(), "10.0.0.7:28233".to_string()]
+            .into_iter()
+            .collect::<IndexSet<String>>(),
+    );
+    assert!(
+        !joined.has_no_peer_sources(),
+        "a SwarmMain node that names a peer is not alone: it must sync before it mines",
+    );
+
+    // The upstream lists are not consulted on SwarmMain, and the SWARM list is not consulted on
+    // the upstream networks.
+    let upstream: Config =
+        toml::from_str("network = 'Mainnet'\ninitial_swarm_main_peers = ['zebra:28233']\n")
+            .expect("the SWARM peer list parses on any network");
+    assert!(!upstream.initial_peer_hostnames().contains("zebra:28233"));
+
+    // A non-empty list survives a round trip; an empty one is not written out at all.
+    let serialized = toml::to_string(&joined).expect("the config serializes");
+    assert!(
+        serialized.contains("initial_swarm_main_peers"),
+        "configured SWARM peers must round trip:\n{serialized}"
+    );
+    let deserialized: Config = toml::from_str(&serialized).expect("the round trip parses");
+    assert_eq!(
+        joined.initial_peer_hostnames(),
+        deserialized.initial_peer_hostnames()
+    );
+
+    assert!(
+        !toml::to_string(&Config::default())
+            .expect("the default config serializes")
+            .contains("initial_swarm_main_peers"),
+        "an empty SWARM peer list is not written into a Zcash operator's config",
+    );
 }
 
 /// A SwarmMain configuration missing any required field fails to parse, with a message naming
