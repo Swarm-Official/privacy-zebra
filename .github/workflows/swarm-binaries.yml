@@ -1,4 +1,14 @@
-# SWARM workstream B: native `zebrad` binaries with the internal CPU miner.
+# SWARM workstream B: the native desktop binaries of the SWARM node tools.
+#
+# Builds, for Windows (MSVC), Linux and macOS, the four tools the mainnet
+# launch needs on an operator machine:
+#
+#   * `zebrad`          the node, with the optional `internal-miner` feature
+#   * `privacy-miner`   the standalone CPU miner (needs `internal-miner`)
+#   * `swarm-keytool`   the offline funding-stream P2SH address tool
+#   * `swarm-treasury`  the offline 2-of-3 treasury custody tool
+#
+# All four come out of one `--locked --release` build of this workspace.
 #
 # Builds Zebra at tag v6.3.0 for Windows (MSVC), Linux and macOS, with default
 # release features plus the optional `internal-miner` feature. Consensus,
@@ -63,7 +73,7 @@ jobs:
             return {include: selected};
   build:
     needs: select-targets
-    name: zebrad ${{ matrix.target }}
+    name: swarm tools ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     # A cold release build of Zebra (RocksDB + the zcash C++ script
     # interpreter + the tromp Equihash solver) can take well over an hour.
@@ -140,20 +150,50 @@ jobs:
       - name: Test SWARM and legacy mining address compatibility
         run: cargo test --locked -p zebra-rpc --lib swarm_prefix_tests
 
-      - name: Build zebrad with the internal miner
+      - name: Build the SWARM mainnet tools
         run: |
           set -euo pipefail
-          cargo build --locked --release --package zebrad --bin zebrad --features "${SWARM_FEATURES}"
+          # zebrad, privacy-miner and swarm-keytool are all binaries of the
+          # `zebrad` package, so one invocation builds the three of them.
+          # `privacy-miner` refuses to run unless it was compiled with
+          # `internal-miner`, which is why the feature is passed here too.
+          cargo build --locked --release --package zebrad \
+            --bin zebrad --bin privacy-miner --bin swarm-keytool \
+            --features "${SWARM_FEATURES}"
+          # The offline 2-of-3 treasury custody tool is its own workspace
+          # member and takes no features.
+          cargo build --locked --release --package swarm-treasury --bin swarm-treasury
 
       - name: Smoke test
         run: |
           set -uo pipefail
 
-          bin="target/release/zebrad"
-          [ "${RUNNER_OS}" = "Windows" ] && bin="target/release/zebrad.exe"
+          exe=""
+          [ "${RUNNER_OS}" = "Windows" ] && exe=".exe"
+          bin="target/release/zebrad${exe}"
 
           echo "--- zebrad --version ---"
           "${bin}" --version || exit 1
+
+          # The three companion tools must at least start, parse their
+          # arguments and print their usage on the platform they were built
+          # for. None of them touches the network or writes key material when
+          # invoked with --help.
+          for tool in privacy-miner swarm-keytool swarm-treasury; do
+            echo "--- ${tool} usage ---"
+            out="$("target/release/${tool}${exe}" --help 2>&1)" || true
+            printf '%s\n' "${out}" | head -n 5
+            if [ -z "${out}" ]; then
+              echo "::error::${tool} printed nothing for --help"
+              exit 1
+            fi
+            case "${out}" in
+              *"Build privacy-miner with --features internal-miner"*)
+                echo "::error::privacy-miner was built without the internal-miner feature"
+                exit 1
+                ;;
+            esac
+          done
 
           echo "--- zebrad generate ---"
           "${bin}" generate -o generated.toml || exit 1
@@ -250,12 +290,22 @@ jobs:
             if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
           }
 
-          bin_name="zebrad"
-          [ "${RUNNER_OS}" = "Windows" ] && bin_name="zebrad.exe"
+          exe=""
+          [ "${RUNNER_OS}" = "Windows" ] && exe=".exe"
+          bin_name="zebrad${exe}"
 
-          stage="swarm-zebrad-${SWARM_TAG}-${TARGET}"
+          # Every tool the SWARM mainnet launch needs on a desktop machine:
+          # the node, the standalone CPU miner, the offline funding-stream
+          # address tool and the offline 2-of-3 treasury custody tool.
+          tools="zebrad privacy-miner swarm-keytool swarm-treasury"
+
+          stage="swarm-tools-${SWARM_TAG}-${TARGET}"
           mkdir -p "dist/${stage}"
-          cp "target/release/${bin_name}" "dist/${stage}/${bin_name}"
+          payload=""
+          for tool in ${tools}; do
+            cp "target/release/${tool}${exe}" "dist/${stage}/${tool}${exe}"
+            payload="${payload} ${tool}${exe}"
+          done
           cp LICENSE-APACHE LICENSE-MIT README.md "dist/${stage}/"
 
           rustc_vv="$(rustc -Vv | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip())[1:-1])')"
@@ -265,14 +315,14 @@ jobs:
           printf '%s\n' \
             '{' \
             "  \"artifact\": \"${stage}.${ARCHIVE}\"," \
-            "  \"binary\": \"${bin_name}\"," \
+            "  \"binaries\": \"${tools}\"," \
             "  \"zebrad_version\": \"${zebrad_version}\"," \
             "  \"source_tag\": \"${SWARM_TAG}\"," \
             "  \"git_commit\": \"${GITHUB_SHA}\"," \
             "  \"git_ref\": \"${GITHUB_REF}\"," \
             "  \"repository\": \"${GITHUB_REPOSITORY}\"," \
             "  \"target\": \"${TARGET}\"," \
-            "  \"cargo_command\": \"cargo build --locked --release --package zebrad --bin zebrad --features ${SWARM_FEATURES}\"," \
+            "  \"cargo_command\": \"cargo build --locked --release --package zebrad --bin zebrad --bin privacy-miner --bin swarm-keytool --features ${SWARM_FEATURES} && cargo build --locked --release --package swarm-treasury --bin swarm-treasury\"," \
             "  \"cargo_features\": \"default (= default-release-binaries) + ${SWARM_FEATURES}\"," \
             "  \"rustc_version\": \"${rustc_vv}\"," \
             "  \"runner_os\": \"${RUNNER_OS}\"," \
@@ -293,15 +343,19 @@ jobs:
               "Compress-Archive -Path '${stage}/*' -DestinationPath '${stage}.zip' -CompressionLevel Optimal"
           else
             tar -czf "${stage}.tar.gz" -C "${stage}" \
-              "${bin_name}" LICENSE-APACHE LICENSE-MIT README.md build-manifest.json
+              ${payload} LICENSE-APACHE LICENSE-MIT README.md build-manifest.json
           fi
-          rm -rf "${stage}"
+
+          # SHA256SUMS lists the archive first and then every binary inside
+          # it, so a downloader can verify one tool without unpacking.
           sha256 "${stage}.${ARCHIVE}" > SHA256SUMS
+          ( cd "${stage}" && sha256 ${payload} ) >> SHA256SUMS
+          rm -rf "${stage}"
           cat SHA256SUMS
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: swarm-zebrad-${{ matrix.target }}
+          name: swarm-tools-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
           retention-days: 30
@@ -310,7 +364,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: swarm-zebrad-${{ matrix.target }}-smoke-log
+          name: swarm-tools-${{ matrix.target }}-smoke-log
           path: smoke.log
           if-no-files-found: ignore
           retention-days: 30
