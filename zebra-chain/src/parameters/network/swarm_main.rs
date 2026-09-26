@@ -630,6 +630,13 @@ mod tests {
         assert_eq!(params.pre_blossom_halving_interval(), 840_000);
         assert_eq!(params.post_blossom_halving_interval(), 1_680_000);
         assert_eq!(params.slow_start_interval(), Height(0));
+        // Read back through `Network`, which used to answer with the upstream 20_000-block
+        // ramp for every network that is not a Testnet.
+        assert_eq!(network.slow_start_interval(), Height(0));
+        assert_eq!(network.slow_start_shift(), Height(0));
+        // One range, the one the profile carries, and not the upstream Mainnet list.
+        assert_eq!(network.all_funding_streams().len(), 1);
+        assert!(network.funding_streams(Height(1)).is_some());
         assert_eq!(COINBASE_MATURITY, 100);
         assert!(!params.should_allow_unshielded_coinbase_spends());
         assert!(!network.should_allow_unshielded_coinbase_spends());

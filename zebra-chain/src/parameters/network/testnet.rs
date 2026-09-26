@@ -1225,19 +1225,24 @@ impl Network {
 
     /// Returns slow start interval for this network
     pub fn slow_start_interval(&self) -> Height {
-        if let Self::Testnet(params) = self {
-            params.slow_start_interval()
-        } else {
-            SLOW_START_INTERVAL
+        match self {
+            Self::Testnet(params) => params.slow_start_interval(),
+            // SWARM pays the whole block subsidy from height 1, so its slow start interval is
+            // zero. Falling through to the upstream constant gave SwarmMain the 20_000-block
+            // Zcash ramp, which scales every subsidy below that height down towards zero --
+            // including block 1, where the profile specifies the full 5 SWM.
+            Self::SwarmMain(params) => params.slow_start_interval(),
+            Self::Mainnet => SLOW_START_INTERVAL,
         }
     }
 
     /// Returns slow start shift for this network
     pub fn slow_start_shift(&self) -> Height {
-        if let Self::Testnet(params) = self {
-            params.slow_start_shift()
-        } else {
-            SLOW_START_SHIFT
+        match self {
+            Self::Testnet(params) => params.slow_start_shift(),
+            // Half of a zero interval. See [`Network::slow_start_interval`].
+            Self::SwarmMain(params) => params.slow_start_shift(),
+            Self::Mainnet => SLOW_START_SHIFT,
         }
     }
 
@@ -1248,12 +1253,18 @@ impl Network {
             .find(|&streams| streams.height_range().contains(&height))
     }
 
-    /// Returns post-Canopy funding streams for this network at the provided height
-    pub fn all_funding_streams(&self) -> &Vec<FundingStreams> {
-        if let Self::Testnet(params) = self {
-            params.funding_streams()
-        } else {
-            &mainnet::FUNDING_STREAMS
+    /// Returns every funding stream range this network defines, in height order.
+    pub fn all_funding_streams(&self) -> &[FundingStreams] {
+        match self {
+            Self::Testnet(params) => params.funding_streams(),
+            // SWARM production holds exactly one funding stream range, on its profile, rather
+            // than a list. Falling through to the upstream Mainnet list here was the largest
+            // hole the NetworkKind audit left: `funding_streams(height)` answered every
+            // SwarmMain block with Zcash's post-Canopy streams, whose destinations are Zcash
+            // `t3...` addresses and whose first range starts at Canopy, so no range covered
+            // height 1 and the configured `s3...` recipients were never consulted at all.
+            Self::SwarmMain(params) => std::slice::from_ref(params.funding_streams()),
+            Self::Mainnet => mainnet::FUNDING_STREAMS.as_slice(),
         }
     }
 
