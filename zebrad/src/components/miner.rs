@@ -10,7 +10,7 @@ use std::{
     cmp::min,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread::available_parallelism,
     time::{Duration, Instant},
@@ -42,12 +42,11 @@ use zebra_rpc::{
         GetBlockTemplateRequestMode::Template,
         HexData,
     },
+    config::mining::Config,
     methods::{RpcImpl, RpcServer},
     proposal_block_from_template,
 };
 use zebra_state::WatchReceiver;
-
-use crate::components::metrics::Config;
 
 /// The amount of time we wait between block template retries.
 pub const BLOCK_TEMPLATE_WAIT_TIME: Duration = Duration::from_secs(20);
@@ -68,6 +67,84 @@ pub const BLOCK_MINING_WAIT_TIME: Duration = Duration::from_secs(3);
 /// solution rate. It is logged in the same `N sol/s` shape the standalone
 /// miner uses, so an operator's tooling can read either miner with one parser.
 pub const SOLVER_RATE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Keeps several solvers racing on one block template down to one submitted block.
+///
+/// Every solver searches the same template over its own nonce range, so more than
+/// one of them can find a valid solution before the node notices the tip has moved.
+/// Those blocks are all valid, but only the first is wanted: the rest are the same
+/// height on the same parent, and submitting them would be the node racing itself.
+///
+/// The claim is keyed on the parent block, which is what "the work we are doing
+/// now" actually means. A new parent — the tip moved, whoever mined it — is new
+/// work and can be claimed again.
+#[derive(Clone, Debug, Default)]
+pub struct SubmissionGuard {
+    claimed_parent: Arc<Mutex<Option<block::Hash>>>,
+}
+
+impl SubmissionGuard {
+    /// Creates a guard that has not claimed any work yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Asks for the right to submit a block that builds on `parent`.
+    ///
+    /// Returns `true` for the first caller for that parent, and `false` for every
+    /// caller after it, until the parent changes.
+    pub fn claim(&self, parent: block::Hash) -> bool {
+        let mut claimed = self
+            .claimed_parent
+            .lock()
+            .expect("submission guard mutex is never held across a panic");
+
+        if *claimed == Some(parent) {
+            return false;
+        }
+
+        *claimed = Some(parent);
+        true
+    }
+}
+
+/// Reports the rate the internal miner's solvers are actually achieving, as one
+/// number for the whole node.
+///
+/// `attempts` is incremented where a solver asks for its next nonce, so one unit is
+/// one real Equihash attempt and the difference over time is this process's own
+/// solution rate, across every solver thread. Nothing here estimates a rate from
+/// blocks found or from the difficulty: an unmeasured rate is reported as nothing
+/// at all.
+async fn report_solver_rate(attempts: Arc<AtomicU64>, solver_count: usize) {
+    let mut last_total = attempts.load(Ordering::Relaxed);
+    let mut last_at = Instant::now();
+
+    while !is_shutting_down() {
+        sleep(SOLVER_RATE_REPORT_INTERVAL).await;
+
+        let now = Instant::now();
+        let total = attempts.load(Ordering::Relaxed);
+        let elapsed = now.duration_since(last_at).as_secs_f64();
+        let attempts_this_window = total.saturating_sub(last_total);
+
+        // A window with no attempts is a miner that is not solving (a new template,
+        // a shutdown, a pause). Reporting zero would look like a measurement, so it
+        // is skipped.
+        if elapsed > 0.0 && attempts_this_window > 0 {
+            let solps = attempts_this_window as f64 / elapsed;
+            info!(
+                solps,
+                attempts = total,
+                solver_count,
+                "internal miner rate: {solps:.0} sol/s (attempts {attempts_this_window} in {elapsed:.1}s across {solver_count} threads)"
+            );
+        }
+
+        last_total = total;
+        last_at = now;
+    }
+}
 
 /// Initialize the miner based on its config, and spawn a task for it.
 ///
@@ -129,7 +206,7 @@ where
 ///
 /// See [`run_mining_solver()`] for more details.
 pub async fn init<Mempool, State, ReadState, Tip, BlockVerifierRouter, SyncStatus, AddressBook>(
-    _config: Config,
+    config: Config,
     rpc: RpcImpl<Mempool, State, ReadState, Tip, AddressBook, BlockVerifierRouter, SyncStatus>,
 ) -> Result<(), Report>
 where
@@ -170,8 +247,16 @@ where
     SyncStatus: ChainSyncStatus + Clone + Send + Sync + 'static,
     AddressBook: AddressBookPeers + Clone + Send + Sync + 'static,
 {
-    // TODO: change this to `config.internal_miner_threads` once mining tasks are cancelled when the best tip changes (#8797)
-    let configured_threads = 1;
+    // Every solver searches the same template over its own nonce range, so this is
+    // how much of this machine the node spends on solving. Unset means one thread,
+    // which is what Zebra has always done.
+    //
+    // Upstream held this at one thread (#8797) because solvers were not cancelled
+    // when the best tip changed. They are here: `generate_block_templates` long-polls
+    // the tip and publishes a new template, `cancel_fn` drops the solver as soon as
+    // the header it is working on is no longer current, and `SubmissionGuard` keeps
+    // a race between two finished solvers down to one submitted block.
+    let configured_threads = config.internal_miner_threads.unwrap_or(1).max(1);
     // If we can't detect the number of cores, use the configured number.
     let available_threads = available_parallelism()
         .map(usize::from)
@@ -182,6 +267,8 @@ where
 
     info!(
         ?solver_count,
+        ?configured_threads,
+        ?available_threads,
         "launching mining tasks with parallel solvers"
     );
 
@@ -198,6 +285,18 @@ where
     abort_handles.push(template_generator.abort_handle());
     let template_generator = template_generator.wait_for_panics();
 
+    // One counter and one reporter for the whole node: an operator wants the rate
+    // this machine is achieving, not one line per thread that they have to add up.
+    let attempts = Arc::new(AtomicU64::new(0));
+    let rate_reporter = tokio::task::spawn(
+        report_solver_rate(attempts.clone(), solver_count).in_current_span(),
+    );
+    abort_handles.push(rate_reporter.abort_handle());
+
+    // Shared by every solver, so the first one to solve the current parent is the
+    // only one that submits.
+    let submission_guard = SubmissionGuard::new();
+
     let mut mining_solvers = FuturesUnordered::new();
     for solver_id in 0..solver_count {
         // Assume there are less than 256 cores. If there are more, only run 256 tasks.
@@ -206,7 +305,14 @@ where
             .expect("just limited to u8::MAX");
 
         let solver = tokio::task::spawn(
-            run_mining_solver(solver_id, template_receiver.clone(), rpc.clone()).in_current_span(),
+            run_mining_solver(
+                solver_id,
+                template_receiver.clone(),
+                rpc.clone(),
+                attempts.clone(),
+                submission_guard.clone(),
+            )
+            .in_current_span(),
         );
         abort_handles.push(solver.abort_handle());
 
@@ -377,6 +483,8 @@ pub async fn run_mining_solver<
     solver_id: u8,
     mut template_receiver: WatchReceiver<Option<Arc<Block>>>,
     rpc: RpcImpl<Mempool, State, ReadState, Tip, AddressBook, BlockVerifierRouter, SyncStatus>,
+    attempts: Arc<AtomicU64>,
+    submission_guard: SubmissionGuard,
 ) -> Result<(), Report>
 where
     Mempool: Service<
@@ -416,41 +524,6 @@ where
     SyncStatus: ChainSyncStatus + Clone + Send + Sync + 'static,
     AddressBook: AddressBookPeers + Clone + Send + Sync + 'static,
 {
-    // Nonces this solver has asked for. Each request is one Equihash attempt,
-    // so the difference between two readings over the time between them is this
-    // solver's real rate. Nothing here estimates a rate from blocks found or
-    // from the difficulty: an unmeasured rate is reported as nothing at all.
-    let attempts = Arc::new(AtomicU64::new(0));
-    let reporter_attempts = attempts.clone();
-    let rate_reporter = tokio::spawn(async move {
-        let mut last_total = reporter_attempts.load(Ordering::Relaxed);
-        let mut last_at = Instant::now();
-
-        while !is_shutting_down() {
-            sleep(SOLVER_RATE_REPORT_INTERVAL).await;
-
-            let now = Instant::now();
-            let total = reporter_attempts.load(Ordering::Relaxed);
-            let elapsed = now.duration_since(last_at).as_secs_f64();
-            let attempts_this_window = total.saturating_sub(last_total);
-
-            // A window with no attempts is a solver that is not solving (a new
-            // template, a shutdown, a pause). Reporting zero would look like a
-            // measurement, so it is skipped.
-            if elapsed > 0.0 && attempts_this_window > 0 {
-                let solps = attempts_this_window as f64 / elapsed;
-                info!(
-                    solps,
-                    attempts = total,
-                    "internal miner rate: {solps:.0} sol/s (attempts {attempts_this_window} in {elapsed:.1}s)"
-                );
-            }
-
-            last_total = total;
-            last_at = now;
-        }
-    });
-
     // Shut down the task when the template sender is dropped, or Zebra shuts down.
     while template_receiver.has_changed().is_ok() && !is_shutting_down() {
         // Get the latest block template, and mark the current value as seen.
@@ -482,14 +555,18 @@ where
         };
 
         let height = template.coinbase_height().expect("template is valid");
+        // The work this solver is doing is "a block on top of this parent". It is
+        // what the solvers share, and what the submission guard claims.
+        let parent_hash = template.header.previous_block_hash;
 
         // Set up the cancellation conditions for the miner.
         let mut cancel_receiver = template_receiver.clone();
         let old_header = *template.header;
         // The solver asks for its next nonce through this closure, so one call
-        // here is one Equihash attempt by this solver. Counting them is the only
-        // honest way to know this machine's rate: nothing else in the node
-        // observes the solver.
+        // here is one Equihash attempt by this solver. Every solver adds to the
+        // same counter, because what an operator wants is this machine's rate, and
+        // counting the attempts is the only honest way to know it: nothing else in
+        // the node observes the solvers.
         let attempts_for_solver = attempts.clone();
         let cancel_fn = move || {
             attempts_for_solver.fetch_add(1, Ordering::Relaxed);
@@ -549,9 +626,29 @@ where
 
         // Submit the newly mined blocks to the verifiers.
         //
+        // With several solvers on one template, more than one of them can finish
+        // before the tip moves. Those blocks are all valid and all build on the same
+        // parent, so only the first is submitted; the rest of the solvers go back for
+        // a new template instead of racing the node against itself.
+        //
         // TODO: if there is a new template (`cancel_fn().is_err()`), and
         //       GetBlockTemplate.submit_old is false, return immediately, and skip submitting the
         //       blocks.
+        if !submission_guard.claim(parent_hash) {
+            debug!(
+                ?height,
+                ?solver_id,
+                ?parent_hash,
+                "another solver already submitted a block for this parent: getting new work",
+            );
+
+            if template_receiver.has_changed().is_ok() && !is_shutting_down() {
+                sleep(BLOCK_TEMPLATE_REFRESH_LIMIT).await;
+            }
+
+            continue;
+        }
+
         let mut any_success = false;
         for block in blocks {
             let data = block
@@ -598,9 +695,6 @@ where
 
         }
     }
-
-    // Stop reporting the rate as soon as this solver stops.
-    rate_reporter.abort();
 
     Ok(())
 }
@@ -664,4 +758,126 @@ where
     Ok(solved_blocks
         .try_into()
         .expect("a 1:1 mapping of AtLeastOne produces at least one block"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::AtomicUsize;
+
+    use zebra_chain::block::Hash;
+
+    /// A parent block hash that is distinct from the others in these tests.
+    fn parent(byte: u8) -> Hash {
+        Hash([byte; 32])
+    }
+
+    #[test]
+    fn config_without_threads_keeps_one_solver() {
+        let config = Config::default();
+
+        assert_eq!(config.internal_miner_solver_count(16), 1);
+    }
+
+    #[test]
+    fn configured_threads_are_capped_by_the_machine() {
+        let config = Config {
+            internal_miner_threads: Some(15),
+            ..Config::default()
+        };
+
+        assert_eq!(config.internal_miner_solver_count(15), 15);
+        assert_eq!(config.internal_miner_solver_count(4), 4);
+    }
+
+    #[test]
+    fn zero_threads_still_runs_one_solver() {
+        let config = Config {
+            internal_miner_threads: Some(0),
+            ..Config::default()
+        };
+
+        assert_eq!(config.internal_miner_solver_count(8), 1);
+        assert_eq!(config.internal_miner_solver_count(0), 1);
+    }
+
+    /// A `[mining] internal_miner_threads` in a config file reaches the miner, and a
+    /// config file without it still parses and still means one thread.
+    #[test]
+    fn threads_round_trip_through_the_config_file() {
+        let configured: Config =
+            toml::from_str("internal_miner = true\ninternal_miner_threads = 6\n")
+                .expect("a config with a thread count parses");
+        assert_eq!(configured.internal_miner_threads, Some(6));
+        assert_eq!(configured.internal_miner_solver_count(32), 6);
+
+        let older: Config =
+            toml::from_str("internal_miner = true\n").expect("a config without the field parses");
+        assert_eq!(older.internal_miner_threads, None);
+        assert_eq!(older.internal_miner_solver_count(32), 1);
+
+        // A node that does not set it writes a config that does not mention it, so
+        // the seed server's stored config is unchanged by this feature existing.
+        let written = toml::to_string(&older).expect("the config serializes");
+        assert!(
+            !written.contains("internal_miner_threads"),
+            "an unset thread count must not appear in a written config, got: {written}",
+        );
+    }
+
+    /// Every solver races on the same template; the node submits one block.
+    #[tokio::test]
+    async fn only_one_of_many_solvers_submits_a_block_for_one_parent() {
+        const SOLVERS: usize = 15;
+
+        let config = Config {
+            internal_miner_threads: Some(SOLVERS),
+            ..Config::default()
+        };
+        let solver_count = config.internal_miner_solver_count(SOLVERS);
+        assert_eq!(solver_count, SOLVERS, "every configured solver runs");
+
+        let guard = SubmissionGuard::new();
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let solved = parent(1);
+
+        // Each task stands for one solver that finished its nonce range on the same
+        // template at the same moment.
+        let mut solvers = Vec::with_capacity(solver_count);
+        for _ in 0..solver_count {
+            let guard = guard.clone();
+            let submissions = submissions.clone();
+            solvers.push(tokio::spawn(async move {
+                if guard.claim(solved) {
+                    submissions.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+
+        for solver in solvers {
+            solver.await.expect("solver task does not panic");
+        }
+
+        assert_eq!(
+            submissions.load(Ordering::SeqCst),
+            1,
+            "{solver_count} solvers on one template must submit exactly one block",
+        );
+    }
+
+    /// A new tip is new work, whoever mined it.
+    #[test]
+    fn a_new_parent_can_be_claimed_again() {
+        let guard = SubmissionGuard::new();
+
+        assert!(guard.claim(parent(1)), "the first claim wins");
+        assert!(!guard.claim(parent(1)), "the same parent is already claimed");
+        assert!(guard.claim(parent(2)), "a new parent is new work");
+        assert!(!guard.claim(parent(2)));
+        assert!(
+            guard.claim(parent(1)),
+            "a reorg back to an earlier parent is new work too"
+        );
+    }
 }

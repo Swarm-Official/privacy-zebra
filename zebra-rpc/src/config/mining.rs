@@ -60,9 +60,37 @@ pub struct Config {
     /// The internal miner is off by default.
     #[serde(default)]
     pub internal_miner: bool,
+
+    /// How many Equihash solver threads the internal miner runs.
+    ///
+    /// The node builds one block template — including a shielded coinbase, when
+    /// [`Self::miner_address`] is a unified address — and each solver searches a
+    /// different nonce range of that same template. Only the search is duplicated,
+    /// so this is a solver setting and not a consensus one: the block that is
+    /// submitted is the same block whichever thread happened to find it.
+    ///
+    /// Each thread uses one CPU core and about 144 MB of RAM. Zebra caps the value
+    /// at the number of cores the machine reports.
+    ///
+    /// Unset means one thread, which is what Zebra has always done. A node that
+    /// should not spend its cores on solving — a seed or RPC server — keeps that
+    /// behaviour by leaving this out of its config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_miner_threads: Option<usize>,
 }
 
 impl Config {
+    /// How many solver threads the internal miner should run on a machine with
+    /// `available_threads` cores.
+    ///
+    /// Always at least one, never more than the machine has, and never more than
+    /// the operator asked for.
+    pub fn internal_miner_solver_count(&self, available_threads: usize) -> usize {
+        let configured = self.internal_miner_threads.unwrap_or(1).max(1);
+
+        configured.min(available_threads.max(1))
+    }
+
     /// Is the internal miner enabled using at least one thread?
     #[cfg(feature = "internal-miner")]
     pub fn is_internal_miner_enabled(&self) -> bool {
