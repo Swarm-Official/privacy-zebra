@@ -288,6 +288,32 @@ fn every_subcommand_runs_in_a_temporary_directory() {
     );
     assert!(proposed.contains("transparent outs  0"));
 
+    // With no --fee at all, the proposal pays the conventional fee of the signed transaction:
+    // 2 transparent logical actions for the one 297-byte signed input, plus the shielded action.
+    let defaulted = must(
+        &directory,
+        &[
+            "spend",
+            "propose",
+            "--policy",
+            "policy.json",
+            "--utxos",
+            "utxos.json",
+            "--to",
+            &recipient,
+            "--expiry-height",
+            &expiry,
+            "--network-upgrade",
+            "nu6_3",
+            "--out",
+            "default-fee-proposal.json",
+        ],
+    );
+    assert!(
+        defaulted.contains("fee               15000 zat (ZIP-317 conventional 15000 zat)"),
+        "{defaulted}"
+    );
+
     // A fee below the ZIP-317 conventional fee is refused.
     let refusal = must_refuse(
         &directory,

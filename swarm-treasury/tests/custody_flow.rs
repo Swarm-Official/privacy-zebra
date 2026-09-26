@@ -30,7 +30,7 @@ use zebra_chain::{
     block::Height,
     parameters::{testnet::Parameters, Network, NetworkUpgrade},
     serialization::{DateTime32, ZcashDeserializeInto},
-    transaction::{self, Transaction, UnminedTx},
+    transaction::{self, zip317, Transaction, UnminedTx},
     transparent::{self, CoinbaseSpendRestriction, OrderedUtxo, Utxo},
 };
 use zebra_consensus::transaction::{
@@ -212,6 +212,11 @@ struct Fixture {
 
 impl Fixture {
     fn build(pool: Pool, fee: u64) -> Result<Self, swarm_treasury::Error> {
+        Self::build_with(pool, Some(fee))
+    }
+
+    /// The same, with no approved fee at all: the proposal pays the conventional fee.
+    fn build_with(pool: Pool, fee: Option<u64>) -> Result<Self, swarm_treasury::Error> {
         let custody = Custody::new();
         let created_height = match pool {
             Pool::V6Ironwood => V6_CREATED_HEIGHT,
@@ -920,5 +925,94 @@ fn digests_are_recomputed_from_the_raw_transaction() {
     assert_eq!(
         fixture.proposal.inputs[0].txid,
         transaction::Hash([0x33u8; 32]).to_string(),
+    );
+}
+
+/// The default fee is the fee the mempool asks for -- on the 2-input, 1-action shape the
+/// treasury actually disburses with, not just the 1-input fixture.
+///
+/// This is the regression behind "Unpaid actions is higher than the limit". `spend propose` used
+/// to price the transaction in the proposal, whose scriptSigs are empty, and advertise 10 000
+/// zat; the node priced the signed transaction, which weighs four transparent logical actions
+/// plus the shielded one, and dropped it. The two numbers here are computed by different code on
+/// different transactions: `required_fee` from the policy and an input count, before any
+/// signature exists, and `zip317` from the bytes of a fully signed transaction.
+#[test]
+fn the_default_fee_is_what_the_mempool_requires() {
+    let fixture = v6_fixture();
+    let policy = fixture.policy();
+    let signatures = fixture.sign_with(&[0, 1]);
+    let combined = spend::combine(&fixture.checked(), policy, &signatures).unwrap();
+
+    // One input: the fixture, signed, on the wire.
+    let one_input = combined.transaction.clone();
+    assert_eq!(one_input.inputs().len(), 1);
+    assert_eq!(
+        spend::required_fee(policy, 1).unwrap(),
+        u64::try_from(i64::from(zip317::conventional_fee(&one_input))).unwrap(),
+        "the fee charged for one input must be the fee ZIP-317 charges the signed transaction",
+    );
+
+    // Two inputs: the same signed input twice, which is the shape of a real disbursement that
+    // sweeps two matured treasury coinbase outputs. Only the sizes matter here.
+    let mut two_inputs = one_input.clone();
+    match &mut two_inputs {
+        Transaction::V6 { inputs, .. } => inputs.push(inputs[0].clone()),
+        other => panic!("the v6 fixture must build a v6 transaction, not {other:?}"),
+    }
+    assert_eq!(two_inputs.inputs().len(), 2);
+
+    let two_input_fee = spend::required_fee(policy, 2).unwrap();
+    assert_eq!(
+        two_input_fee,
+        u64::try_from(i64::from(zip317::conventional_fee(&two_inputs))).unwrap(),
+    );
+    // Four transparent logical actions (2 x 297 bytes, 150 bytes each) plus one shielded action.
+    assert_eq!(two_input_fee, 5 * zip317::MARGINAL_FEE);
+
+    // And that is exactly what the mempool's own check requires: it passes at the default fee
+    // and fails one marginal fee below it.
+    let unmined = UnminedTx::from(Arc::new(two_inputs));
+    let size = unmined.size;
+    for (fee, accepted) in [
+        (two_input_fee, true),
+        (two_input_fee - zip317::MARGINAL_FEE, false),
+    ] {
+        let fee = Amount::<NonNegative>::try_from(fee).unwrap();
+        let result = zip317::mempool_checks(zip317::unpaid_actions(&unmined, fee), fee, size);
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{fee:?} zat should {} the mempool: {result:?}",
+            if accepted { "pass" } else { "be refused by" },
+        );
+    }
+}
+
+/// A proposal built without an approved fee pays the conventional fee, and an approved fee below
+/// it is refused rather than quietly raised.
+#[test]
+fn an_underpaying_approved_fee_is_refused() {
+    let fixture = v6_fixture();
+    let required = spend::required_fee(fixture.policy(), 1).unwrap();
+    assert!(
+        required < APPROVED_FEE,
+        "the fixture must approve at least the conventional fee"
+    );
+
+    let defaulted = Fixture::build_with(Pool::V6Ironwood, None).expect("the default fee builds");
+    assert_eq!(defaulted.proposal.fee, required);
+    assert_eq!(defaulted.proposal.conventional_fee, required);
+    spend::check(&defaulted.proposal, defaulted.policy()).expect("a default-fee proposal checks");
+
+    let error = match Fixture::build_with(Pool::V6Ironwood, Some(required - 1)) {
+        Err(error) => error,
+        Ok(_) => panic!("a fee below the conventional fee must be refused"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("below the ZIP-317 conventional fee"),
+        "unexpected error: {error}",
     );
 }

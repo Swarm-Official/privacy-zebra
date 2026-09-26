@@ -23,10 +23,16 @@ mod tests;
 pub const MARGINAL_FEE: u64 = 5_000;
 
 /// The number of grace logical actions allowed by the ZIP-317 fee calculation.
-const GRACE_ACTIONS: u32 = 2;
+///
+/// Public so that a tool which must know a transaction's fee *before* it can build that
+/// transaction — an offline multisig coordinator, which cannot serialize a scriptSig it has no
+/// signatures for yet — computes the same number this module does, instead of its own.
+pub const GRACE_ACTIONS: u32 = 2;
 
 /// The standard size of p2pkh inputs for the ZIP-317 fee calculation, in bytes.
-const P2PKH_STANDARD_INPUT_SIZE: usize = 150;
+///
+/// Public for the same reason as [`GRACE_ACTIONS`].
+pub const P2PKH_STANDARD_INPUT_SIZE: usize = 150;
 
 /// The standard size of p2pkh outputs for the ZIP-317 fee calculation, in bytes.
 const P2PKH_STANDARD_OUTPUT_SIZE: usize = 34;

@@ -46,6 +46,72 @@ pub const FINAL_SCHEMA: &str = "swarm-treasury.final";
 /// The version shared by the proposal, signature and final schemas.
 pub const SPEND_SCHEMA_VERSION: u32 = 1;
 
+// -- the ZIP-317 fee ---------------------------------------------------------
+
+/// The largest DER-encoded ECDSA signature, plus the `SIGHASH_ALL` byte a scriptSig appends to
+/// it.
+///
+/// A low-s DER signature over secp256k1 is at most 72 bytes; real ones are usually 70 or 71.
+/// The fee is computed from the largest, so the size this tool charges for is never smaller than
+/// the transaction it finally broadcasts.
+pub const MAX_SIGNATURE_LEN: usize = 73;
+
+/// The number of shielded actions in every bundle this tool builds.
+///
+/// One output note, no spends, `BundleType::UNPADDED`: [`shielded::build_bundle`] refuses a
+/// bundle with any other action count, so this is a fact about the tool and not an estimate.
+pub const SHIELDED_ACTIONS: u32 = 1;
+
+/// The ZIP-317 conventional fee, in zatoshis, of the transaction this tool will finally
+/// broadcast when it spends `input_count` outputs of `policy`.
+///
+/// # Why this is not the conventional fee of the proposal's own transaction
+///
+/// ZIP-317 charges *logical actions*, and a transparent input's logical actions are
+/// `ceil(serialized size / 150)`, which depends on the size of its scriptSig. A proposal carries
+/// no signatures yet, so the transaction inside it has empty scriptSigs and weighs one logical
+/// action where the signed transaction weighs four. Pricing that shape produced a transaction
+/// every node refused with "Unpaid actions is higher than the limit": a node counts the actions
+/// of the transaction it is handed, which is the signed one.
+///
+/// So this prices the *signed* transaction before it exists: `threshold` signatures of the
+/// largest size, plus the redeem script, in each input's scriptSig, plus the one shielded
+/// action -- with ZIP-317's own constants, taken from `zebra-chain` rather than restated here.
+pub fn required_fee(policy: &CheckedPolicy, input_count: usize) -> Result<u64> {
+    if input_count == 0 {
+        return Err(refuse!("there is nothing to spend"));
+    }
+
+    let signatures = vec![vec![0u8; MAX_SIGNATURE_LEN]; usize::from(policy.policy.threshold)];
+    let script_sig = script::multisig_script_sig(&signatures, &policy.redeem_script)?;
+    let signed_input = transparent::Input::PrevOut {
+        outpoint: OutPoint {
+            hash: transaction::Hash([0u8; 32]),
+            index: 0,
+        },
+        unlock_script: transparent::Script::new(&script_sig),
+        sequence: 0,
+    };
+
+    let tx_in_total_size = signed_input
+        .zcash_serialized_size()
+        .checked_mul(input_count)
+        .ok_or_else(|| refuse!("too many inputs to weigh"))?;
+
+    // There is never a transparent output, so ZIP-317's `tx_out_logical_actions` is zero.
+    let transparent_actions =
+        u32::try_from(tx_in_total_size.div_ceil(zip317::P2PKH_STANDARD_INPUT_SIZE))
+            .map_err(|_| refuse!("too many inputs to weigh"))?;
+    let logical_actions = transparent_actions
+        .checked_add(SHIELDED_ACTIONS)
+        .ok_or_else(|| refuse!("too many inputs to weigh"))?;
+
+    let conventional_actions = std::cmp::max(zip317::GRACE_ACTIONS, logical_actions);
+    zip317::MARGINAL_FEE
+        .checked_mul(u64::from(conventional_actions))
+        .ok_or_else(|| refuse!("the conventional fee overflows"))
+}
+
 // -- the proposal ------------------------------------------------------------
 
 /// One input of a proposal: what is being spent, and the digest that must be signed for it.
@@ -148,8 +214,9 @@ pub struct ProposalRequest<'a> {
     pub recipient: orchard::Address,
     /// The memo text.
     pub memo_text: &'a str,
-    /// The approved fee, in zatoshis.
-    pub fee: u64,
+    /// The approved fee, in zatoshis, or `None` to pay the ZIP-317 conventional fee of the
+    /// signed transaction -- [`required_fee`]. An approved fee below that is refused.
+    pub fee: Option<u64>,
     /// The transaction's expiry height.
     pub expiry_height: u32,
     /// The pool to pay into.
@@ -173,14 +240,30 @@ pub fn propose(request: ProposalRequest<'_>) -> Result<Proposal> {
         return Err(refuse!("there is nothing to spend"));
     }
 
+    // The fee the mempool will require of the *signed* transaction. It depends only on the
+    // transaction's shape -- how many inputs, how large their scriptSigs will be, one shielded
+    // action -- and not on any amount, so it is settled before the bundle is built.
+    let conventional_fee = required_fee(policy, selected.len())?;
+    let fee = match request.fee {
+        None => conventional_fee,
+        Some(approved) if approved < conventional_fee => {
+            return Err(refuse!(
+                "the approved fee of {approved} zat is below the ZIP-317 conventional fee of \
+                 {conventional_fee} zat for a {}-input disbursement from this policy; a node \
+                 will not relay it. Leave the fee out to pay {conventional_fee} zat.",
+                selected.len(),
+            ))
+        }
+        Some(approved) => approved,
+    };
+
     let total_in = crate::utxo::total_value(selected)?;
-    if request.fee >= total_in {
+    if fee >= total_in {
         return Err(refuse!(
-            "the fee ({} zat) is not less than the selected value ({total_in} zat)",
-            request.fee,
+            "the fee ({fee} zat) is not less than the selected value ({total_in} zat)",
         ));
     }
-    let amount_out = total_in - request.fee;
+    let amount_out = total_in - fee;
 
     let memo = shielded::memo_from_text(request.memo_text)?;
     let expiry_height = Height(request.expiry_height);
@@ -247,14 +330,14 @@ pub fn propose(request: ProposalRequest<'_>) -> Result<Proposal> {
         ));
     }
 
-    let conventional_fee = zip317::conventional_fee(&transaction);
-    let approved_fee = zatoshis_to_amount(request.fee)?;
-    if approved_fee < conventional_fee {
+    // The unsigned transaction's own conventional fee is a lower bound on the signed one's:
+    // scriptSigs only grow. If it ever came out higher, the shape priced above was wrong, and
+    // the proposal would advertise a fee the mempool refuses.
+    let unsigned_fee = i64::from(zip317::conventional_fee(&transaction));
+    if unsigned_fee > i64::try_from(conventional_fee).unwrap_or(i64::MAX) {
         return Err(refuse!(
-            "the approved fee of {} zat is below the ZIP-317 conventional fee of {} zat for this \
-             transaction; a node will not relay it",
-            request.fee,
-            i64::from(conventional_fee),
+            "the unsigned transaction already costs {unsigned_fee} zat, more than the \
+             {conventional_fee} zat computed for the signed one; this build cannot price itself"
         ));
     }
 
@@ -298,9 +381,8 @@ pub fn propose(request: ProposalRequest<'_>) -> Result<Proposal> {
         recipient_raw_receiver: hex::encode(request.recipient.to_raw_address_bytes()),
         memo: request.memo_text.to_string(),
         expiry_height: request.expiry_height,
-        fee: request.fee,
-        conventional_fee: u64::try_from(i64::from(conventional_fee))
-            .map_err(|_| refuse!("the conventional fee is negative"))?,
+        fee,
+        conventional_fee,
         total_in,
         amount_out,
         inputs,
@@ -489,7 +571,17 @@ pub fn check(proposal: &Proposal, policy: &CheckedPolicy) -> Result<CheckedPropo
             i64::from(miner_fee),
         ));
     }
-    let conventional_fee = zip317::conventional_fee(&transaction);
+    // The fee the signed transaction will owe, not the fee the unsigned one appears to owe:
+    // a signing device must refuse a proposal the mempool would drop after it is signed.
+    let conventional_fee = required_fee(policy, proposal.inputs.len())?;
+    if proposal.conventional_fee != conventional_fee {
+        return Err(refuse!(
+            "the proposal records a ZIP-317 conventional fee of {} zat, this shape owes \
+             {conventional_fee} zat",
+            proposal.conventional_fee,
+        ));
+    }
+    let conventional_fee = zatoshis_to_amount(conventional_fee)?;
     if miner_fee < conventional_fee {
         return Err(refuse!(
             "the transaction's fee of {} zat is below the ZIP-317 conventional fee of {} zat",

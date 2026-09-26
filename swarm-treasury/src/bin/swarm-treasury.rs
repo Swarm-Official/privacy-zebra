@@ -36,8 +36,8 @@ Usage:
                                  --public C.public.json --out policy.json
   swarm-treasury policy verify   policy.json
   swarm-treasury spend propose   --policy policy.json --utxos utxos.json --to ADDRESS \\
-                                 --fee ZAT --expiry-height H --network-upgrade nu6_3 \\
-                                 [--memo TEXT] --out proposal.json
+                                 --expiry-height H --network-upgrade nu6_3 \\
+                                 [--fee ZAT] [--memo TEXT] --out proposal.json
   swarm-treasury spend show      proposal.json [--policy policy.json]
   swarm-treasury spend sign      --proposal proposal.json --signer A.signer.age \\
                                  [--policy policy.json] --out A.sig.json
@@ -54,8 +54,11 @@ coordinator runs `spend combine` and broadcasts the hex with sendrawtransaction.
 Backup passphrases are read from the SWARM_TREASURY_PASSPHRASE environment variable if it is
 set, otherwise from a prompt. They are never taken from the command line.
 
-Networks: testnet, swarmrehearsal. The swarmmain address encoding is on another branch and
-this build refuses it rather than handing back a testnet address.
+--fee defaults to the ZIP-317 conventional fee of the SIGNED transaction, which is what a node
+requires to relay it. Giving --fee pays more; giving less than the conventional fee is refused.
+
+Networks: testnet, swarmrehearsal, swarmmain. A policy, a proposal and a signature all name
+their network, and every step refuses a file from another one.
 
 This tool never talks to a node, never holds more than one signer key per device, keeps no
 change (whole selected UTXOs minus the fee go to the shielded recipient) and is not a hardware
@@ -179,6 +182,17 @@ impl Arguments {
         self.required(name)?
             .parse()
             .map_err(|_| refuse!("--{name} must be a whole number"))
+    }
+
+    /// The value of an option that may be left out. Still refused if it is given and unparsable.
+    fn optional_number<T: std::str::FromStr>(&self, name: &str) -> Result<Option<T>> {
+        self.get(name)
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| refuse!("--{name} must be a whole number"))
+            })
+            .transpose()
     }
 }
 
@@ -425,7 +439,8 @@ fn spend_propose(args: &[String]) -> Result<()> {
     let pool = Pool::parse(args.required("network-upgrade")?)?;
     let recipient_text = args.required("to")?;
     let recipient = shielded::parse_recipient(recipient_text, policy.network)?;
-    let fee: u64 = args.required_number("fee")?;
+    // Left out, the proposal pays the ZIP-317 conventional fee of the signed transaction.
+    let fee: Option<u64> = args.optional_number("fee")?;
     let expiry_height: u32 = args.required_number("expiry-height")?;
     let memo = args.get("memo").unwrap_or("");
     let out = PathBuf::from(args.required("out")?);
