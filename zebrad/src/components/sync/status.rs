@@ -17,6 +17,7 @@ mod tests;
 pub struct SyncStatus {
     latest_sync_length: watch::Receiver<Vec<usize>>,
     is_regtest: bool,
+    is_alone: bool,
 }
 
 impl SyncStatus {
@@ -27,17 +28,17 @@ impl SyncStatus {
     /// once Zebra reaches the tip.
     const MIN_DIST_FROM_TIP: usize = 20;
 
-    /// Create an instance of [`SyncStatus`] for a specific network.
+    /// Create an instance of [`SyncStatus`] for a network configuration.
     ///
     /// The status is determined based on the latest counts of synchronized blocks, observed
-    /// through `latest_sync_length`. In regtest, [`ChainSyncStatus::is_close_to_tip`] always returns `true`.
-    pub fn new_for_network(
-        network: &zebra_chain::parameters::Network,
-    ) -> (Self, RecentSyncLengths) {
+    /// through `latest_sync_length`. On Regtest, and on a node the configuration leaves with no
+    /// peer to sync from, [`ChainSyncStatus::is_close_to_tip`] always returns `true`.
+    pub fn new_for_config(config: &zebra_network::Config) -> (Self, RecentSyncLengths) {
         let (recent_sync_lengths, latest_sync_length) = RecentSyncLengths::new();
         let status = SyncStatus {
             latest_sync_length,
-            is_regtest: network.is_regtest(),
+            is_regtest: config.network.is_regtest(),
+            is_alone: config.has_no_peer_sources(),
         };
 
         (status, recent_sync_lengths)
@@ -52,6 +53,7 @@ impl SyncStatus {
         let status = SyncStatus {
             latest_sync_length,
             is_regtest: false,
+            is_alone: false,
         };
 
         (status, recent_sync_lengths)
@@ -73,6 +75,18 @@ impl ChainSyncStatus for SyncStatus {
     /// Check if the synchronization is likely close to the chain tip.
     fn is_close_to_tip(&self) -> bool {
         if self.is_regtest {
+            return true;
+        }
+
+        // A node with no seed list and no peer cache has nobody to be behind. `sync_lengths` stays
+        // empty forever in that state, because the syncer never completes an attempt, so the
+        // average below can never be computed and this function would answer `false` for the life
+        // of the process. That answer stops the mempool activating and makes `getblocktemplate`
+        // refuse a template, so the first node on a brand-new chain could never mine its first
+        // block -- on Regtest that is already special-cased above, and every other private chain
+        // Zebra has run so far was a Testnet, where `check_synced_to_tip` skips the question
+        // entirely. `Network::SwarmMain` is neither, which is where it surfaced.
+        if self.is_alone {
             return true;
         }
 

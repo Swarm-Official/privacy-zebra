@@ -257,6 +257,17 @@ impl Config {
         }
     }
 
+    /// Returns `true` if this configuration gives the node no way to learn of any peer:
+    /// no seed list for its network, and no on-disk peer cache to read.
+    ///
+    /// Such a node is alone on its network by construction. It is the state a node is in while
+    /// it bootstraps a brand-new chain, before any other node exists to peer with, which is
+    /// exactly the situation the first SWARM production node starts in: `initial_peer_hostnames`
+    /// is empty on `SwarmMain` by design, because the upstream lists name Zcash DNS seeders.
+    pub fn has_no_peer_sources(&self) -> bool {
+        self.initial_peer_hostnames().is_empty() && !self.cache_dir.is_enabled()
+    }
+
     /// Resolve initial seed peer IP addresses, based on the configured network,
     /// and load cached peers from disk, if available.
     ///
